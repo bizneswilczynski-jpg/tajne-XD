@@ -222,15 +222,6 @@ local function startFlight(player: Player, session: Session)
 	local velocity = Config.launchVelocity(profile.gas)
 	profile.gas = 0
 
-	-- Humanoid w stanie Running trzyma postac na wysokosci bioder i potrafi
-	-- zjesc caly impuls w tej samej klatce. Przelaczamy go w Freefall PRZED
-	-- nadaniem predkosci, inaczej PUK czesto konczy sie skokiem na 2 study.
-	humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
-
-	-- Zachowujemy poziomy ped, zeby dalo sie sterowac lotem w powietrzu.
-	local horizontal = root.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
-	root.AssemblyLinearVelocity = horizontal + Vector3.new(0, velocity, 0)
-
 	session.flight = {
 		launchY = root.Position.Y,
 		apexY = root.Position.Y,
@@ -241,19 +232,13 @@ local function startFlight(player: Player, session: Session)
 		velocity = velocity,
 	}
 
-	-- Druga proba na najblizszym kroku fizyki -- gdyby stan Humanoida jednak
-	-- zdazyl wyzerowac predkosc, zanim silnik ja zastosowal.
-	task.defer(function()
-		if session.flight and root.Parent and root.AssemblyLinearVelocity.Y < velocity * 0.5 then
-			root.AssemblyLinearVelocity = Vector3.new(
-				root.AssemblyLinearVelocity.X,
-				velocity,
-				root.AssemblyLinearVelocity.Z
-			)
-		end
-	end)
-
 	pushState(player, session)
+
+	-- Sam impuls zadaje KLIENT. Postac gracza ma sieciowego wlasciciela po
+	-- stronie klienta, wiec predkosc ustawiona z serwera jest kasowana przy
+	-- najblizszej replikacji fizyki -- zmierzone: 300 studow/s z serwera daje
+	-- 4 study wzniosu, te same 300 z klienta daje 374 study.
+	-- Serwer zostaje sedzia: on decyduje ILE, on liczy wysokosc i SLAWE.
 	notifyRemote:FireClient(player, "puk", velocity)
 end
 
@@ -266,6 +251,12 @@ local function finishFlight(player: Player, session: Session)
 
 	local profile = session.profile
 	local height = math.max(flight.apexY - flight.launchY, 0)
+
+	-- Impuls zadaje klient, wiec wysokosc trzeba obciac do tego, co przy tej
+	-- predkosci w ogole jest fizycznie mozliwe. Bez tego podmieniony klient
+	-- moglby zglosic dowolne apogeum.
+	local ceiling = flight.velocity ^ 2 / (2 * math.max(workspace.Gravity, 1)) * Config.Flight.heightTolerance
+	height = math.min(height, ceiling)
 
 	local ringCount = 0
 	for _ in flight.rings do
@@ -378,23 +369,20 @@ local function trackFlight(session: Session, root: BasePart)
 end
 
 -- Lot liczymy co klatke; jedzenie wystarczy co Config.EAT_TICK.
-local function updateFlight(player: Player, session: Session, root: BasePart, humanoid: Humanoid, deltaTime: number, now: number)
+local function updateFlight(player: Player, session: Session, root: BasePart, humanoid: Humanoid, now: number)
 	local flight = session.flight :: Flight
 
 	trackFlight(session, root)
 	player:SetAttribute("FlightHeight", root.Position.Y - flight.launchY)
 
 	local airborne = humanoid.FloorMaterial == Enum.Material.Air
-	if airborne then
+	-- Druga przeslanka poza FloorMaterial: stan Humanoida replikuje sie z
+	-- opoznieniem, a realna zmiana wysokosci nie klamie.
+	if airborne or root.Position.Y - flight.launchY > Config.Flight.airborneHeight then
 		flight.airborne = true
 	end
 
-	-- Po apogeum dokladamy grawitacji, zeby opadanie nie bylo martwym czasem.
 	local linear = root.AssemblyLinearVelocity
-	if flight.airborne and linear.Y < 0 then
-		root.AssemblyLinearVelocity = linear - Vector3.new(0, Config.Flight.fallBoost * deltaTime, 0)
-	end
-
 	local elapsed = now - flight.startedAt
 	local settled = flight.airborne and not airborne and linear.Y <= Config.Flight.settleVelocity
 	local launchFailed = not flight.airborne and elapsed > Config.Flight.launchGrace
@@ -455,7 +443,7 @@ RunService.Heartbeat:Connect(function(deltaTime)
 		end
 
 		if session.flight then
-			updateFlight(player, session, root, humanoid, deltaTime, now)
+			updateFlight(player, session, root, humanoid, now)
 		end
 
 		if step > 0 then

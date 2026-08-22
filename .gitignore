@@ -3,3 +3,7 @@
 *.rbxm
 *.rbxl.lock
 sourcemap.json
+
+# lokalny plik testowy budowany przez rojo build
+FartFly-test.rbxlx
+*.rbxlx.lock

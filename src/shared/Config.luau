@@ -85,9 +85,15 @@ Config.Flight = {
 	maxDuration = 120,
 	-- Ponizej tej predkosci pionowej (na ziemi) uznajemy ze postac stoi.
 	settleVelocity = 1,
+	-- Przyrost wysokosci, od ktorego uznajemy ze postac naprawde wystartowala
+	-- (niezaleznie od replikacji FloorMaterial).
+	airborneHeight = 8,
 	-- Dodatkowe przyspieszenie w dol PO apogeum: wznoszenie zostaje wysokie,
 	-- ale spadanie nie ciagnie sie przez pol minuty.
 	fallBoost = 140,
+	-- Zapas nad teoretycznym apogeum, powyzej ktorego serwer przycina wynik.
+	-- Impuls zadaje klient, wiec wysokosc musi miec fizyczny sufit.
+	heightTolerance = 1.35,
 }
 
 -- DIETA (rebirth): kasujemy GAZ i SLAWE za trwaly mnoznik do calego zarobku.

@@ -255,6 +255,73 @@ ContextActionService:BindAction("Puk", function(_, state)
 end, false, Enum.KeyCode.F, Enum.KeyCode.ButtonR2)
 
 --------------------------------------------------------------------------------
+-- Wystrzal
+--------------------------------------------------------------------------------
+-- Impuls MUSI polecieciec stad, nie z serwera: postac ma sieciowego wlasciciela
+-- po stronie klienta, wiec AssemblyLinearVelocity ustawione na serwerze jest
+-- kasowane przy najblizszej replikacji fizyki. Serwer decyduje o wartosci
+-- predkosci i liczy nagrode, klient tylko wykonuje.
+
+local fallConnection: RBXScriptConnection? = nil
+
+local function stopFallBoost()
+	if fallConnection then
+		fallConnection:Disconnect()
+		fallConnection = nil
+	end
+end
+
+local function applyPuk(velocity: number)
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not root or not humanoid then
+		return
+	end
+
+	-- Humanoid w stanie Running trzyma postac na wysokosci bioder i potrafi
+	-- zjesc impuls w tej samej klatce.
+	humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
+
+	-- Poziomy ped zostaje, zeby dalo sie sterowac lotem w powietrzu.
+	local horizontal = root.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
+	root.AssemblyLinearVelocity = horizontal + Vector3.new(0, velocity, 0)
+
+	-- Opadanie przyspieszamy, zeby zjazd z apogeum nie byl martwym czasem.
+	stopFallBoost()
+	local startedAt = os.clock()
+	local wasAirborne = false
+
+	fallConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		local currentCharacter = player.Character
+		local currentRoot = currentCharacter and currentCharacter:FindFirstChild("HumanoidRootPart") :: BasePart?
+		local currentHumanoid = currentCharacter and currentCharacter:FindFirstChildOfClass("Humanoid")
+
+		if not currentRoot or not currentHumanoid or os.clock() - startedAt > Config.Flight.maxDuration then
+			stopFallBoost()
+			return
+		end
+
+		local airborne = currentHumanoid.FloorMaterial == Enum.Material.Air
+		if airborne then
+			wasAirborne = true
+		elseif wasAirborne then
+			stopFallBoost()
+			return
+		end
+
+		local linear = currentRoot.AssemblyLinearVelocity
+		if wasAirborne and linear.Y < 0 then
+			currentRoot.AssemblyLinearVelocity = linear - Vector3.new(0, Config.Flight.fallBoost * deltaTime, 0)
+		end
+	end)
+end
+
+--------------------------------------------------------------------------------
 -- Powiadomienia z serwera
 --------------------------------------------------------------------------------
 
@@ -265,6 +332,7 @@ notifyRemote.OnClientEvent:Connect(function(kind: string, ...)
 		local earned, elapsed, foodName = args[1], args[2], args[3]
 		toast(`Jadles {foodName} przez {Format.time(elapsed)} → +{Format.short(earned)} GAZ`, BROWN)
 	elseif kind == "puk" then
+		applyPuk(args[1])
 		toast("PUUUUK! 💨", BROWN)
 	elseif kind == "landed" then
 		local earned, height, rings = args[1], args[2], args[3]
