@@ -8,8 +8,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
-local Config = require(ReplicatedStorage.Shared.Config)
-local Format = require(ReplicatedStorage.Shared.Format)
+-- WaitForChild, a nie bezposrednie indeksowanie: skrypt klienta potrafi ruszyc
+-- zanim ReplicatedStorage sie zreplikuje i wtedy caly HUD wywala sie na
+-- "Shared is not a valid member of ReplicatedStorage".
+local sharedFolder = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(sharedFolder:WaitForChild("Config"))
+local Format = require(sharedFolder:WaitForChild("Format"))
 
 local player = Players.LocalPlayer
 local remotes = ReplicatedStorage:WaitForChild("Remotes")

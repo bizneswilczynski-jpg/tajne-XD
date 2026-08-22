@@ -15,6 +15,19 @@ local Config = {}
 -- Ile GAZU na sekunde daje samo stanie na stolowce, zanim wejda mnozniki.
 Config.BASE_RATE = 1
 
+-- Grawitacja swiata. Nizsza niz domyslne 196.2 => wyzsze i dluzsze loty.
+-- Ustawiana z kodu (Workspace.Gravity), nie z default.project.json,
+-- zeby caly tuning lotu siedzial w jednym pliku.
+Config.GRAVITY = 120
+
+-- Co ile sekund naliczamy jedzenie. Sam lot jest liczony co klatke,
+-- bo przy predkosci 200+ studow/s takt 0.1 s przeskakuje pierscienie.
+Config.EAT_TICK = 0.1
+
+-- Dlugosc promienia szukajacego stolowki pod postacia. HumanoidRootPart
+-- siedzi ~3 study nad ziemia, wiec 10 lapie i R6, i R15.
+Config.FOOD_RAY_LENGTH = 10
+
 -- Maksymalny czas offline, za ktory naliczamy GAZ po powrocie (8h).
 Config.OFFLINE_CAP_SECONDS = 8 * 60 * 60
 
@@ -57,6 +70,24 @@ Config.Rings = {
 	spacing = 1.55, -- kazdy kolejny pierscien jest 1.55x wyzej
 	radius = 11,
 	bonusPerRing = 0.10,
+	-- Tolerancja dla lotu poziomego dokladnie na wysokosci pierscienia.
+	planeTolerance = 3,
+}
+
+-- Zachowanie postaci w locie.
+Config.Flight = {
+	-- Minimalny czas lotu, zanim w ogole zaczniemy szukac ladowania.
+	minAirtime = 0.75,
+	-- Jesli w tym czasie postac ani razu nie oderwala sie od ziemi, to znaczy
+	-- ze impuls zjadl Humanoid -- konczymy lot zamiast wisiec w nieskonczonosc.
+	launchGrace = 1.5,
+	-- Twardy limit dlugosci lotu.
+	maxDuration = 120,
+	-- Ponizej tej predkosci pionowej (na ziemi) uznajemy ze postac stoi.
+	settleVelocity = 1,
+	-- Dodatkowe przyspieszenie w dol PO apogeum: wznoszenie zostaje wysokie,
+	-- ale spadanie nie ciagnie sie przez pol minuty.
+	fallBoost = 140,
 }
 
 -- DIETA (rebirth): kasujemy GAZ i SLAWE za trwaly mnoznik do calego zarobku.

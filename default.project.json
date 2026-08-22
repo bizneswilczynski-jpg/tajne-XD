@@ -23,13 +23,6 @@
       }
     },
 
-    "Workspace": {
-      "$properties": {
-        "Gravity": 120,
-        "FilteringEnabled": true
-      }
-    },
-
     "Lighting": {
       "$properties": {
         "ClockTime": 15,

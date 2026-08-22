@@ -22,6 +22,14 @@ type Flight = {
 	apexY: number,
 	rings: { [number]: true },
 	startedAt: number,
+	-- Czy postac w ogole oderwala sie od ziemi. Bez tego ladowanie wykrywa sie
+	-- juz w pierwszej klatce po PUKU (gracz nadal stoi na stolowce) i lot
+	-- konczy sie z wynikiem 0 m.
+	airborne: boolean,
+	-- Pozycja z poprzedniej klatki -- pierscienie liczymy jako przeciecie
+	-- odcinka, a nie trafienie w okno +/- kilka studow.
+	lastPosition: Vector3,
+	velocity: number,
 }
 
 type Session = {
@@ -101,7 +109,7 @@ local function foodUnderCharacter(character: Model): Config.Food?
 	params.FilterType = Enum.RaycastFilterType.Exclude
 	params.FilterDescendantsInstances = { character }
 
-	local result = workspace:Raycast(root.Position, Vector3.new(0, -8, 0), params)
+	local result = workspace:Raycast(root.Position, Vector3.new(0, -Config.FOOD_RAY_LENGTH, 0), params)
 	if not result then
 		return nil
 	end
@@ -166,6 +174,16 @@ local function onPlayerAdded(player: Player)
 
 	stats.Parent = player
 
+	-- Smierc lub respawn w trakcie lotu zostawilby otwarty Flight z nieaktualnym
+	-- launchY, wiec przy kazdej nowej postaci czyscimy stan lotu.
+	player.CharacterAdded:Connect(function()
+		local current = sessions[player]
+		if current then
+			current.flight = nil
+			player:SetAttribute("FlightHeight", 0)
+		end
+	end)
+
 	grantOfflineGas(player, session)
 	pushState(player, session)
 end
@@ -204,6 +222,11 @@ local function startFlight(player: Player, session: Session)
 	local velocity = Config.launchVelocity(profile.gas)
 	profile.gas = 0
 
+	-- Humanoid w stanie Running trzyma postac na wysokosci bioder i potrafi
+	-- zjesc caly impuls w tej samej klatce. Przelaczamy go w Freefall PRZED
+	-- nadaniem predkosci, inaczej PUK czesto konczy sie skokiem na 2 study.
+	humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
+
 	-- Zachowujemy poziomy ped, zeby dalo sie sterowac lotem w powietrzu.
 	local horizontal = root.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
 	root.AssemblyLinearVelocity = horizontal + Vector3.new(0, velocity, 0)
@@ -213,7 +236,22 @@ local function startFlight(player: Player, session: Session)
 		apexY = root.Position.Y,
 		rings = {},
 		startedAt = os.clock(),
+		airborne = false,
+		lastPosition = root.Position,
+		velocity = velocity,
 	}
+
+	-- Druga proba na najblizszym kroku fizyki -- gdyby stan Humanoida jednak
+	-- zdazyl wyzerowac predkosc, zanim silnik ja zastosowal.
+	task.defer(function()
+		if session.flight and root.Parent and root.AssemblyLinearVelocity.Y < velocity * 0.5 then
+			root.AssemblyLinearVelocity = Vector3.new(
+				root.AssemblyLinearVelocity.X,
+				velocity,
+				root.AssemblyLinearVelocity.Z
+			)
+		end
+	end)
 
 	pushState(player, session)
 	notifyRemote:FireClient(player, "puk", velocity)
@@ -277,10 +315,36 @@ end)
 -- Petla glowna
 --------------------------------------------------------------------------------
 
-local ringParts = {}
+local ringParts: { Instance } = {}
 
 local function refreshRings()
 	ringParts = CollectionService:GetTagged(World.RING_TAG)
+end
+
+-- Czy odcinek from->to przebija plaszczyzne pierscienia wewnatrz jego promienia.
+-- Sprawdzanie samej odleglosci od srodka nie dziala: przy 200+ studach na
+-- sekunde postac przeskakuje caly pierscien miedzy dwiema klatkami.
+local function crossesRing(from: Vector3, to: Vector3, center: Vector3): boolean
+	local dy = to.Y - from.Y
+	local point: Vector3
+
+	if math.abs(dy) < 1e-4 then
+		-- Lot praktycznie poziomy: liczymy zwykla odleglosc od plaszczyzny.
+		if math.abs(from.Y - center.Y) > Config.Rings.planeTolerance then
+			return false
+		end
+		point = to
+	else
+		local t = (center.Y - from.Y) / dy
+		if t < 0 or t > 1 then
+			return false
+		end
+		point = from:Lerp(to, t)
+	end
+
+	local flatPoint = Vector3.new(point.X, 0, point.Z)
+	local flatCenter = Vector3.new(center.X, 0, center.Z)
+	return (flatPoint - flatCenter).Magnitude <= Config.Rings.radius
 end
 
 local function trackFlight(session: Session, root: BasePart)
@@ -290,6 +354,8 @@ local function trackFlight(session: Session, root: BasePart)
 	end
 
 	local position = root.Position
+	local previous = flight.lastPosition
+	flight.lastPosition = position
 	flight.apexY = math.max(flight.apexY, position.Y)
 
 	for _, ring in ringParts do
@@ -301,11 +367,7 @@ local function trackFlight(session: Session, root: BasePart)
 			continue
 		end
 
-		local center = ring.Position
-		local verticalGap = math.abs(position.Y - center.Y)
-		local horizontalGap = (Vector3.new(position.X, 0, position.Z) - Vector3.new(center.X, 0, center.Z)).Magnitude
-
-		if verticalGap <= 4 and horizontalGap <= Config.Rings.radius then
+		if crossesRing(previous, position, ring.Position) then
 			flight.rings[index] = true
 			ring.Transparency = 0.75
 			task.delay(0.6, function()
@@ -315,15 +377,68 @@ local function trackFlight(session: Session, root: BasePart)
 	end
 end
 
+-- Lot liczymy co klatke; jedzenie wystarczy co Config.EAT_TICK.
+local function updateFlight(player: Player, session: Session, root: BasePart, humanoid: Humanoid, deltaTime: number, now: number)
+	local flight = session.flight :: Flight
+
+	trackFlight(session, root)
+	player:SetAttribute("FlightHeight", root.Position.Y - flight.launchY)
+
+	local airborne = humanoid.FloorMaterial == Enum.Material.Air
+	if airborne then
+		flight.airborne = true
+	end
+
+	-- Po apogeum dokladamy grawitacji, zeby opadanie nie bylo martwym czasem.
+	local linear = root.AssemblyLinearVelocity
+	if flight.airborne and linear.Y < 0 then
+		root.AssemblyLinearVelocity = linear - Vector3.new(0, Config.Flight.fallBoost * deltaTime, 0)
+	end
+
+	local elapsed = now - flight.startedAt
+	local settled = flight.airborne and not airborne and linear.Y <= Config.Flight.settleVelocity
+	local launchFailed = not flight.airborne and elapsed > Config.Flight.launchGrace
+
+	if (settled and elapsed > Config.Flight.minAirtime) or launchFailed or elapsed > Config.Flight.maxDuration then
+		finishFlight(player, session)
+		player:SetAttribute("FlightHeight", 0)
+	end
+end
+
+local function updateEating(player: Player, session: Session, character: Model, step: number)
+	local profile = session.profile
+	local food = foodUnderCharacter(character)
+
+	if food and not isFoodUnlocked(profile, food) then
+		player:SetAttribute("Eating", false)
+		player:SetAttribute("EatingFood", `🔒 {food.name}`)
+		player:SetAttribute("Rate", 0)
+	elseif food then
+		local rate = food.rate * Config.rebirthMultiplier(profile.rebirths)
+		profile.gas += rate * step
+		profile.lastFoodId = food.id
+
+		player:SetAttribute("Eating", true)
+		player:SetAttribute("EatingFood", food.name)
+		player:SetAttribute("Rate", rate)
+		player:SetAttribute("Gas", profile.gas)
+	else
+		player:SetAttribute("Eating", false)
+		player:SetAttribute("EatingFood", "")
+		player:SetAttribute("Rate", 0)
+	end
+end
+
 local accumulator = 0
 
 RunService.Heartbeat:Connect(function(deltaTime)
 	accumulator += deltaTime
-	if accumulator < 0.1 then
-		return
+
+	local step = 0
+	if accumulator >= Config.EAT_TICK then
+		step = accumulator
+		accumulator = 0
 	end
-	local step = accumulator
-	accumulator = 0
 
 	local now = os.clock()
 
@@ -339,48 +454,17 @@ RunService.Heartbeat:Connect(function(deltaTime)
 			continue
 		end
 
-		local profile = session.profile
-
-		-- Jedzenie
-		local food = foodUnderCharacter(character)
-		if food and not isFoodUnlocked(profile, food) then
-			player:SetAttribute("Eating", false)
-			player:SetAttribute("EatingFood", `🔒 {food.name}`)
-			player:SetAttribute("Rate", 0)
-		elseif food then
-			local rate = food.rate * Config.rebirthMultiplier(profile.rebirths)
-			profile.gas += rate * step
-			profile.lastFoodId = food.id
-
-			player:SetAttribute("Eating", true)
-			player:SetAttribute("EatingFood", food.name)
-			player:SetAttribute("Rate", rate)
-			player:SetAttribute("Gas", profile.gas)
-		else
-			player:SetAttribute("Eating", false)
-			player:SetAttribute("EatingFood", "")
-			player:SetAttribute("Rate", 0)
-		end
-
-		-- Lot
 		if session.flight then
-			trackFlight(session, root)
-
-			local flight = session.flight :: Flight
-			player:SetAttribute("FlightHeight", root.Position.Y - flight.launchY)
-
-			local airborne = humanoid.FloorMaterial == Enum.Material.Air
-			local settled = not airborne and root.AssemblyLinearVelocity.Y <= 1
-			if (settled and now - flight.startedAt > 0.75) or now - flight.startedAt > 120 then
-				finishFlight(player, session)
-				player:SetAttribute("FlightHeight", 0)
-			end
+			updateFlight(player, session, root, humanoid, deltaTime, now)
 		end
 
-		-- Autosave
-		if now - session.lastSave > Config.AUTOSAVE_INTERVAL then
-			session.lastSave = now
-			task.spawn(Data.save, player.UserId, profile)
+		if step > 0 then
+			updateEating(player, session, character, step)
+
+			if now - session.lastSave > Config.AUTOSAVE_INTERVAL then
+				session.lastSave = now
+				task.spawn(Data.save, player.UserId, session.profile)
+			end
 		end
 	end
 end)
@@ -389,8 +473,11 @@ end)
 -- Start
 --------------------------------------------------------------------------------
 
+workspace.Gravity = Config.GRAVITY
+
 World.build()
 refreshRings()
+print(`[FartFly] swiat gotowy: {#ringParts} pierscieni, {#Config.Foods} stolowek, grawitacja {workspace.Gravity}`)
 CollectionService:GetInstanceAddedSignal(World.RING_TAG):Connect(refreshRings)
 CollectionService:GetInstanceRemovedSignal(World.RING_TAG):Connect(refreshRings)
 
