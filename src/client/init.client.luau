@@ -2,7 +2,6 @@
 -- HUD budowany z kodu -- zero zaleznosci od recznie klikanych GUI w Studio,
 -- wiec caly interfejs jest wersjonowany w gicie razem z logika.
 
-local ContextActionService = game:GetService("ContextActionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -17,13 +16,50 @@ local Format = require(sharedFolder:WaitForChild("Format"))
 
 local player = Players.LocalPlayer
 local remotes = ReplicatedStorage:WaitForChild("Remotes")
-local pukRemote = remotes:WaitForChild("Puk") :: RemoteEvent
 local rebirthRemote = remotes:WaitForChild("Rebirth") :: RemoteEvent
 local notifyRemote = remotes:WaitForChild("Notify") :: RemoteEvent
 
 local BROWN = Color3.fromRGB(150, 110, 60)
 local GREEN = Color3.fromRGB(110, 190, 110)
+local GOLD = Color3.fromRGB(250, 210, 90)
 local DARK = Color3.fromRGB(24, 26, 32)
+
+--------------------------------------------------------------------------------
+-- Sila skoku
+--------------------------------------------------------------------------------
+-- Musi byc egzekwowana STAD. Postac ma sieciowego wlasciciela po stronie
+-- klienta, wiec JumpPower ustawiony przez serwer bywa po cichu nadpisany
+-- lokalna wartoscia i przestaje sie replikowac w dol. Serwer liczy poziom
+-- i podaje wynik atrybutem; klient tylko go stosuje.
+
+local function applyJumpPower(humanoid: Humanoid)
+	local power = player:GetAttribute("JumpPower")
+	if typeof(power) ~= "number" then
+		return
+	end
+	humanoid.UseJumpPower = true
+	humanoid.JumpPower = power
+end
+
+local function bindCharacter(character: Model)
+	local humanoid = character:WaitForChild("Humanoid") :: Humanoid
+	applyJumpPower(humanoid)
+
+	local connection = player:GetAttributeChangedSignal("JumpPower"):Connect(function()
+		if humanoid.Parent then
+			applyJumpPower(humanoid)
+		end
+	end)
+
+	humanoid.Died:Connect(function()
+		connection:Disconnect()
+	end)
+end
+
+if player.Character then
+	task.spawn(bindCharacter, player.Character)
+end
+player.CharacterAdded:Connect(bindCharacter)
 
 --------------------------------------------------------------------------------
 -- Budowa HUD
@@ -68,65 +104,72 @@ screen.IgnoreGuiInset = true
 screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screen.Parent = player:WaitForChild("PlayerGui")
 
--- Panel gazu (lewy gorny rog)
-local gasPanel = panel(screen, "GasPanel")
-gasPanel.Size = UDim2.fromOffset(260, 96)
-gasPanel.Position = UDim2.fromOffset(16, 16)
+-- Panel fartow i poziomu (lewy gorny rog)
+local fartPanel = panel(screen, "FartPanel")
+fartPanel.Size = UDim2.fromOffset(300, 132)
+fartPanel.Position = UDim2.fromOffset(16, 16)
 
-local gasValue = text(gasPanel, "Value", UDim2.new(1, -20, 0, 44), UDim2.fromOffset(12, 8))
-gasValue.TextColor3 = BROWN
+local fartValue = text(fartPanel, "Value", UDim2.new(1, -20, 0, 42), UDim2.fromOffset(12, 8))
+fartValue.TextColor3 = BROWN
 
-local gasRate = text(gasPanel, "Rate", UDim2.new(1, -20, 0, 22), UDim2.fromOffset(12, 54))
-gasRate.TextColor3 = Color3.fromRGB(180, 180, 190)
+local fartRate = text(fartPanel, "Rate", UDim2.new(1, -20, 0, 22), UDim2.fromOffset(12, 52))
+fartRate.TextColor3 = Color3.fromRGB(180, 180, 190)
 
-local eatingLabel = text(gasPanel, "Eating", UDim2.new(1, -20, 0, 20), UDim2.fromOffset(12, 74))
-eatingLabel.TextColor3 = GREEN
+local zoneLabel = text(fartPanel, "Zone", UDim2.new(1, -20, 0, 20), UDim2.fromOffset(12, 74))
+zoneLabel.TextColor3 = GREEN
 
--- Panel slawy (prawy gorny rog)
-local famePanel = panel(screen, "FamePanel")
-famePanel.Size = UDim2.fromOffset(230, 96)
-famePanel.Position = UDim2.new(1, -246, 0, 16)
+local levelLabel = text(fartPanel, "Level", UDim2.new(1, -20, 0, 20), UDim2.fromOffset(12, 96))
+levelLabel.TextColor3 = Color3.fromRGB(140, 200, 255)
 
-local fameValue = text(famePanel, "Value", UDim2.new(1, -20, 0, 40), UDim2.fromOffset(12, 8))
-fameValue.TextColor3 = Color3.fromRGB(250, 210, 90)
+-- Pasek postepu poziomu
+local barBg = Instance.new("Frame")
+barBg.Name = "LevelBar"
+barBg.Size = UDim2.new(1, -24, 0, 8)
+barBg.Position = UDim2.fromOffset(12, 118)
+barBg.BackgroundColor3 = Color3.fromRGB(50, 54, 64)
+barBg.BorderSizePixel = 0
+barBg.Parent = fartPanel
+corner(barBg, 4)
 
-local dietLabel = text(famePanel, "Diet", UDim2.new(1, -20, 0, 22), UDim2.fromOffset(12, 50))
-local bestLabel = text(famePanel, "Best", UDim2.new(1, -20, 0, 20), UDim2.fromOffset(12, 72))
-bestLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
+local barFill = Instance.new("Frame")
+barFill.Name = "Fill"
+barFill.Size = UDim2.fromScale(0, 1)
+barFill.BackgroundColor3 = Color3.fromRGB(140, 200, 255)
+barFill.BorderSizePixel = 0
+barFill.Parent = barBg
+corner(barFill, 4)
 
--- Wysokosciomierz -- widoczny tylko w locie
+-- Panel walut (prawy gorny rog)
+local walletPanel = panel(screen, "WalletPanel")
+walletPanel.Size = UDim2.fromOffset(240, 112)
+walletPanel.Position = UDim2.new(1, -256, 0, 16)
+
+local winsValue = text(walletPanel, "Wins", UDim2.new(1, -20, 0, 34), UDim2.fromOffset(12, 8))
+winsValue.TextColor3 = GOLD
+
+local fameValue = text(walletPanel, "Fame", UDim2.new(1, -20, 0, 30), UDim2.fromOffset(12, 44))
+fameValue.TextColor3 = Color3.fromRGB(200, 160, 255)
+
+local dietLabel = text(walletPanel, "Diet", UDim2.new(1, -20, 0, 20), UDim2.fromOffset(12, 78))
+dietLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
+
+-- Wysokosciomierz (gora, srodek)
 local altPanel = panel(screen, "AltPanel")
-altPanel.Size = UDim2.fromOffset(230, 70)
-altPanel.Position = UDim2.new(0.5, -115, 0, 16)
-altPanel.Visible = false
+altPanel.Size = UDim2.fromOffset(240, 74)
+altPanel.Position = UDim2.new(0.5, -120, 0, 16)
 
-local altValue = text(altPanel, "Value", UDim2.new(1, -20, 0, 40), UDim2.fromOffset(12, 6))
+local altValue = text(altPanel, "Value", UDim2.new(1, -20, 0, 40), UDim2.fromOffset(10, 6))
 altValue.TextXAlignment = Enum.TextXAlignment.Center
-altValue.Position = UDim2.fromOffset(10, 6)
 
-local altName = text(altPanel, "Name", UDim2.new(1, -20, 0, 20), UDim2.fromOffset(10, 46))
+local altName = text(altPanel, "Name", UDim2.new(1, -20, 0, 22), UDim2.fromOffset(10, 46))
 altName.TextXAlignment = Enum.TextXAlignment.Center
 altName.TextColor3 = Color3.fromRGB(180, 180, 190)
-
--- Przycisk PUK
-local pukButton = Instance.new("TextButton")
-pukButton.Name = "PukButton"
-pukButton.Size = UDim2.fromOffset(210, 78)
-pukButton.Position = UDim2.new(0.5, -105, 1, -120)
-pukButton.BackgroundColor3 = BROWN
-pukButton.BorderSizePixel = 0
-pukButton.Font = Enum.Font.FredokaOne
-pukButton.TextScaled = true
-pukButton.TextColor3 = Color3.new(1, 1, 1)
-pukButton.Text = "PUK  [F]"
-pukButton.Parent = screen
-corner(pukButton, 16)
 
 -- Przycisk DIETY
 local rebirthButton = Instance.new("TextButton")
 rebirthButton.Name = "RebirthButton"
-rebirthButton.Size = UDim2.fromOffset(230, 44)
-rebirthButton.Position = UDim2.new(1, -246, 0, 122)
+rebirthButton.Size = UDim2.fromOffset(240, 52)
+rebirthButton.Position = UDim2.new(1, -256, 0, 138)
 rebirthButton.BackgroundColor3 = Color3.fromRGB(90, 70, 140)
 rebirthButton.BorderSizePixel = 0
 rebirthButton.Font = Enum.Font.FredokaOne
@@ -136,11 +179,17 @@ rebirthButton.Text = "DIETA"
 rebirthButton.Parent = screen
 corner(rebirthButton, 10)
 
+-- Podpowiedz sterowania
+local hint = text(screen, "Hint", UDim2.fromOffset(420, 26), UDim2.new(0.5, -210, 1, -46))
+hint.TextXAlignment = Enum.TextXAlignment.Center
+hint.TextColor3 = Color3.fromRGB(190, 190, 200)
+hint.Text = "SPACJA -- skacz. Im wyzszy poziom, tym wyzej."
+
 -- Toasty
 local toastHolder = Instance.new("Frame")
 toastHolder.Name = "Toasts"
-toastHolder.Size = UDim2.fromOffset(340, 300)
-toastHolder.Position = UDim2.new(0.5, -170, 0, 110)
+toastHolder.Size = UDim2.fromOffset(360, 300)
+toastHolder.Position = UDim2.new(0.5, -180, 0, 104)
 toastHolder.BackgroundTransparency = 1
 toastHolder.Parent = screen
 
@@ -152,7 +201,7 @@ toastLayout.Parent = toastHolder
 
 local function toast(message: string, color: Color3?)
 	local label = Instance.new("TextLabel")
-	label.Size = UDim2.fromOffset(340, 34)
+	label.Size = UDim2.fromOffset(360, 34)
 	label.BackgroundColor3 = DARK
 	label.BackgroundTransparency = 0.15
 	label.BorderSizePixel = 0
@@ -185,141 +234,55 @@ local function number(name: string): number
 end
 
 local function refresh()
-	local gas = number("Gas")
-	local rate = number("Rate")
 	local multiplier = math.max(number("Multiplier"), 1)
+	local rate = number("Rate")
 
-	gasValue.Text = `💨 {Format.short(gas)}`
-	gasRate.Text = if rate > 0
-		then `+{Format.short(rate)} GAZ/s  (x{multiplier})`
-		else `stoisz bezczynnie  (x{multiplier})`
+	fartValue.Text = `💨 {Format.short(number("Farts"))}`
+	fartRate.Text = `+{Format.short(rate)} /s  (dieta x{Format.short(multiplier)})`
 
-	local eating = player:GetAttribute("Eating") == true
-	local foodName = player:GetAttribute("EatingFood")
-	if eating and typeof(foodName) == "string" then
-		eatingLabel.Text = `MNIAM · {foodName}`
-		eatingLabel.TextColor3 = GREEN
-	elseif typeof(foodName) == "string" and foodName ~= "" then
-		eatingLabel.Text = `{foodName} — za malo SLAWY`
-		eatingLabel.TextColor3 = Color3.fromRGB(230, 120, 120)
+	local zoneName = player:GetAttribute("ZoneName")
+	local zoneMultiplier = math.max(number("ZoneMultiplier"), 1)
+	if typeof(zoneName) == "string" and zoneName ~= "" then
+		if player:GetAttribute("ZoneLocked") == true then
+			zoneLabel.Text = `🔒 {zoneName} — brak WINOW lub SLAWY`
+			zoneLabel.TextColor3 = Color3.fromRGB(230, 120, 120)
+		else
+			zoneLabel.Text = `{zoneName} · x{Format.short(zoneMultiplier)} tempa`
+			zoneLabel.TextColor3 = GREEN
+		end
 	else
-		eatingLabel.Text = "wejdz na stolowke, zeby jesc"
-		eatingLabel.TextColor3 = Color3.fromRGB(150, 150, 160)
+		zoneLabel.Text = "wejdz na strefe, zeby przyspieszyc"
+		zoneLabel.TextColor3 = Color3.fromRGB(150, 150, 160)
 	end
 
-	fameValue.Text = `⭐ {Format.short(number("Fame"))}`
-	dietLabel.Text = `DIETA {number("Rebirths")}`
-	bestLabel.Text = `rekord: {math.floor(number("BestHeight"))}m`
+	local level = number("Level")
+	local into = number("LevelProgress")
+	local needed = number("LevelNeeded")
+	levelLabel.Text = `POZIOM {level} · skok {math.floor(number("JumpPower"))}`
+	barFill.Size = UDim2.fromScale(if needed > 0 then math.clamp(into / needed, 0, 1) else 1, 1)
 
-	local cost = number("RebirthCost")
-	local canRebirth = number("Fame") >= cost
-	rebirthButton.Text = `DIETA · {Format.short(cost)} ⭐`
+	winsValue.Text = `🏆 {Format.short(number("Wins"))} WIN`
+	fameValue.Text = `⭐ {Format.short(number("Fame"))} SLAWY`
+	dietLabel.Text = `DIETA {number("Rebirths")} · rekord {math.floor(number("BestHeight"))}m`
+
+	local height = number("Height")
+	altValue.Text = `{math.floor(height)}m`
+	altName.Text = `{Config.altitudeName(height)} · pietro {number("BestFloor")}`
+
+	local winCost = number("RebirthWinCost")
+	local fameCost = number("RebirthFameCost")
+	local canRebirth = number("Wins") >= winCost and number("Fame") >= fameCost
+	rebirthButton.Text = `DIETA · {Format.short(winCost)}🏆 + {Format.short(fameCost)}⭐`
 	rebirthButton.BackgroundColor3 = if canRebirth
 		then Color3.fromRGB(130, 95, 200)
 		else Color3.fromRGB(60, 55, 75)
-
-	local flightHeight = number("FlightHeight")
-	if flightHeight > 1 then
-		altPanel.Visible = true
-		altValue.Text = `{math.floor(flightHeight)}m`
-		altName.Text = Config.altitudeName(flightHeight)
-	else
-		altPanel.Visible = false
-	end
-
-	pukButton.BackgroundColor3 = if gas >= Config.Launch.minGasToPuk
-		then BROWN
-		else Color3.fromRGB(80, 70, 55)
 end
 
 RunService.RenderStepped:Connect(refresh)
 
---------------------------------------------------------------------------------
--- Wejscie
---------------------------------------------------------------------------------
-
-local function firePuk()
-	pukRemote:FireServer()
-end
-
-pukButton.Activated:Connect(firePuk)
 rebirthButton.Activated:Connect(function()
 	rebirthRemote:FireServer()
 end)
-
-ContextActionService:BindAction("Puk", function(_, state)
-	if state == Enum.UserInputState.Begin then
-		firePuk()
-	end
-	return Enum.ContextActionResult.Sink
-end, false, Enum.KeyCode.F, Enum.KeyCode.ButtonR2)
-
---------------------------------------------------------------------------------
--- Wystrzal
---------------------------------------------------------------------------------
--- Impuls MUSI polecieciec stad, nie z serwera: postac ma sieciowego wlasciciela
--- po stronie klienta, wiec AssemblyLinearVelocity ustawione na serwerze jest
--- kasowane przy najblizszej replikacji fizyki. Serwer decyduje o wartosci
--- predkosci i liczy nagrode, klient tylko wykonuje.
-
-local fallConnection: RBXScriptConnection? = nil
-
-local function stopFallBoost()
-	if fallConnection then
-		fallConnection:Disconnect()
-		fallConnection = nil
-	end
-end
-
-local function applyPuk(velocity: number)
-	local character = player.Character
-	if not character then
-		return
-	end
-
-	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not root or not humanoid then
-		return
-	end
-
-	-- Humanoid w stanie Running trzyma postac na wysokosci bioder i potrafi
-	-- zjesc impuls w tej samej klatce.
-	humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
-
-	-- Poziomy ped zostaje, zeby dalo sie sterowac lotem w powietrzu.
-	local horizontal = root.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
-	root.AssemblyLinearVelocity = horizontal + Vector3.new(0, velocity, 0)
-
-	-- Opadanie przyspieszamy, zeby zjazd z apogeum nie byl martwym czasem.
-	stopFallBoost()
-	local startedAt = os.clock()
-	local wasAirborne = false
-
-	fallConnection = RunService.Heartbeat:Connect(function(deltaTime)
-		local currentCharacter = player.Character
-		local currentRoot = currentCharacter and currentCharacter:FindFirstChild("HumanoidRootPart") :: BasePart?
-		local currentHumanoid = currentCharacter and currentCharacter:FindFirstChildOfClass("Humanoid")
-
-		if not currentRoot or not currentHumanoid or os.clock() - startedAt > Config.Flight.maxDuration then
-			stopFallBoost()
-			return
-		end
-
-		local airborne = currentHumanoid.FloorMaterial == Enum.Material.Air
-		if airborne then
-			wasAirborne = true
-		elseif wasAirborne then
-			stopFallBoost()
-			return
-		end
-
-		local linear = currentRoot.AssemblyLinearVelocity
-		if wasAirborne and linear.Y < 0 then
-			currentRoot.AssemblyLinearVelocity = linear - Vector3.new(0, Config.Flight.fallBoost * deltaTime, 0)
-		end
-	end)
-end
 
 --------------------------------------------------------------------------------
 -- Powiadomienia z serwera
@@ -329,20 +292,12 @@ notifyRemote.OnClientEvent:Connect(function(kind: string, ...)
 	local args = { ... }
 
 	if kind == "offline" then
-		local earned, elapsed, foodName = args[1], args[2], args[3]
-		toast(`Jadles {foodName} przez {Format.time(elapsed)} → +{Format.short(earned)} GAZ`, BROWN)
-	elseif kind == "puk" then
-		applyPuk(args[1])
-		toast("PUUUUK! 💨", BROWN)
-	elseif kind == "landed" then
-		local earned, height, rings = args[1], args[2], args[3]
-		local ringText = if rings > 0 then ` · {rings} pierscieni` else ""
-		toast(`{math.floor(height)}m{ringText} → +{Format.short(earned)} ⭐`, Color3.fromRGB(250, 210, 90))
-	elseif kind == "noGas" then
-		toast("Pusto w brzuchu — idz cos zjesc", Color3.fromRGB(230, 120, 120))
+		toast(`Pierdziales przez {Format.time(args[2])} → +{Format.short(args[1])} 💨`, BROWN)
+	elseif kind == "win" then
+		toast(`PIETRO {args[2]} zaliczone → +{Format.short(args[1])} 🏆`, GOLD)
 	elseif kind == "rebirth" then
-		toast(`DIETA {args[1]} — mnoznik x{Config.rebirthMultiplier(args[1])}`, Color3.fromRGB(180, 150, 255))
+		toast(`DIETA {args[1]} — tempo x{Format.short(Config.rebirthMultiplier(args[1]))}`, Color3.fromRGB(180, 150, 255))
 	elseif kind == "rebirthTooPoor" then
-		toast(`Potrzebujesz {Format.short(args[1])} ⭐ na diete`, Color3.fromRGB(230, 120, 120))
+		toast(`Brakuje: {Format.short(args[1])}🏆 i {Format.short(args[2])}⭐`, Color3.fromRGB(230, 120, 120))
 	end
 end)

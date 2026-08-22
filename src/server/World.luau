@@ -1,7 +1,7 @@
 --!strict
 -- Buduje mape z kodu, zeby projekt dzialal na pustym placu prosto po `rojo serve`.
--- Nic tutaj nie jest swiete -- docelowo stolowki i pierscienie moga byc
--- recznie postawionymi modelami, logika szuka ich po tagach/atrybutach.
+-- Nic tutaj nie jest swiete -- docelowo strefy i pietra moga byc recznie
+-- postawionymi modelami, logika szuka ich po tagach/atrybutach.
 
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -12,10 +12,13 @@ local Format = require(ReplicatedStorage.Shared.Format)
 
 local World = {}
 
-World.FOOD_TAG = "FoodStation"
-World.RING_TAG = "FartRing"
+World.ZONE_TAG = "SpeedZone"
+World.WIN_TAG = "WinPad"
 
-local SPAWN_SIZE = Vector3.new(90, 4, 60)
+local SPAWN_SIZE = Vector3.new(120, 4, 120)
+
+local tubeFolder: Folder? = nil
+local highestFloor = 0
 
 local function makeAnchored(className: string, parent: Instance): any
 	local part = Instance.new(className)
@@ -29,7 +32,7 @@ local function label(parent: BasePart, text: string, offsetY: number): Billboard
 	gui.Size = UDim2.fromScale(11, 3)
 	gui.StudsOffsetWorldSpace = Vector3.new(0, offsetY, 0)
 	gui.AlwaysOnTop = true
-	gui.MaxDistance = 220
+	gui.MaxDistance = 260
 	gui.Parent = parent
 
 	local textLabel = Instance.new("TextLabel")
@@ -45,8 +48,12 @@ local function label(parent: BasePart, text: string, offsetY: number): Billboard
 	return gui
 end
 
-local function buildSpawn(folder: Folder)
-	local pad = makeAnchored("Part", folder) :: Part
+--------------------------------------------------------------------------------
+-- Dol: spawn i strefy przyspieszajace
+--------------------------------------------------------------------------------
+
+local function buildSpawn(parent: Folder)
+	local pad = makeAnchored("Part", parent) :: Part
 	pad.Name = "SpawnPad"
 	pad.Size = SPAWN_SIZE
 	pad.Position = Vector3.new(0, -2, 0)
@@ -55,81 +62,146 @@ local function buildSpawn(folder: Folder)
 	pad.TopSurface = Enum.SurfaceType.Smooth
 
 	local spawnLocation = Instance.new("SpawnLocation")
+	spawnLocation.Name = "Start"
 	spawnLocation.Size = Vector3.new(12, 1, 12)
-	spawnLocation.Position = Vector3.new(0, 0.5, 18)
+	spawnLocation.Position = Vector3.new(0, 0.5, 44)
 	spawnLocation.Anchored = true
 	spawnLocation.Color = Color3.fromRGB(120, 200, 120)
 	spawnLocation.TopSurface = Enum.SurfaceType.Smooth
-	spawnLocation.Parent = folder
+	spawnLocation.Parent = parent
 end
 
--- Jedna stolowka: pad, na ktorym gracz stoi i je. To jest caly "AFK".
-local function buildFoodStation(folder: Folder, food: Config.Food, index: number)
-	local spacing = 16
-	local originX = -((#Config.Foods - 1) * spacing) / 2
+-- Strefy stoja w luku wokol wlotu rury, zeby zadna nie zaslaniala srodka.
+local function buildZone(parent: Folder, zone: Config.Zone, index: number, total: number)
+	local spread = math.rad(210)
+	local startAngle = math.rad(165)
+	local angle = startAngle + (if total > 1 then (index - 1) / (total - 1) * spread else spread / 2)
+	local distance = Config.Tube.radius + 22
 
-	local pad = makeAnchored("Part", folder) :: Part
-	pad.Name = "Food_" .. food.id
-	pad.Size = Vector3.new(12, 1, 12)
-	pad.Position = Vector3.new(originX + (index - 1) * spacing, 0.5, -14)
+	local pad = makeAnchored("Part", parent) :: Part
+	pad.Name = "Zone_" .. zone.id
+	pad.Size = Vector3.new(14, 1, 14)
+	pad.Position = Vector3.new(math.cos(angle) * distance, 0.5, math.sin(angle) * distance)
 	pad.Material = Enum.Material.Neon
-	pad.Color = food.color
+	pad.Color = zone.color
 	pad.TopSurface = Enum.SurfaceType.Smooth
-	pad.CanCollide = true
 
-	pad:SetAttribute("FoodId", food.id)
-	CollectionService:AddTag(pad, World.FOOD_TAG)
+	pad:SetAttribute("ZoneId", zone.id)
+	CollectionService:AddTag(pad, World.ZONE_TAG)
 
-	local text = if food.unlockAt > 0
-		then string.format("%s\n+%s GAZ/s\n🔒 %s SLAWY", food.name, Format.short(food.rate), Format.short(food.unlockAt))
-		else string.format("%s\n+%s GAZ/s", food.name, Format.short(food.rate))
+	local text = if zone.unlockAt > 0
+		then string.format("%s\nx%s tempa\nLOCK %s WIN", zone.name, Format.short(zone.multiplier), Format.short(zone.unlockAt))
+		else string.format("%s\nx%s tempa", zone.name, Format.short(zone.multiplier))
 
-	local gui = label(pad, text, 6)
-	gui.Name = "Info"
+	label(pad, text, 6).Name = "Info"
 end
 
--- Pierscienie ustawione wykladniczo w gore -- kazdy kolejny wymaga
--- realnie wiekszego lotu, wiec sluza za widoczna miare postepu.
-local function buildRings(folder: Folder)
-	local height = Config.Rings.firstHeight
+--------------------------------------------------------------------------------
+-- Rura
+--------------------------------------------------------------------------------
 
-	for i = 1, Config.Rings.count do
-		local ring = makeAnchored("Part", folder) :: Part
-		ring.Name = "Ring_" .. i
-		ring.Shape = Enum.PartType.Cylinder
-		ring.Size = Vector3.new(1, Config.Rings.radius * 2, Config.Rings.radius * 2)
-		ring.CFrame = CFrame.new(0, height, 0) * CFrame.Angles(0, 0, math.rad(90))
-		ring.Material = Enum.Material.Neon
-		ring.Color = Color3.fromHSV((i / Config.Rings.count) % 1, 0.7, 1)
-		ring.Transparency = 0.35
-		ring.CanCollide = false
-		ring.CanQuery = false
+-- Pietro sklada sie z dwoch rzeczy:
+--   * pierscienia WIN na osi rury -- zbieranego W LOCIE, bez ladowania,
+--   * polki przy scianie -- opcjonalnego miejsca na odpoczynek i kolejny skok.
+-- Srodek rury zostaje przelotowy, wiec mocny skok moze minac wiele pieter naraz
+-- i zebrac po drodze wszystkie WINY.
+local function buildFloor(parent: Folder, floor: number)
+	local tube = Config.Tube
+	local height = Config.floorHeight(floor)
+	local hue = (floor * 0.11) % 1
 
-		ring:SetAttribute("RingIndex", i)
-		CollectionService:AddTag(ring, World.RING_TAG)
+	local model = Instance.new("Folder")
+	model.Name = "Floor_" .. floor
+	model.Parent = parent
 
-		height = math.floor(height * Config.Rings.spacing)
+	-- Pierscien WIN: plaski dysk na osi, bez kolizji i bez udzialu w raycastach.
+	local ring = makeAnchored("Part", model) :: Part
+	ring.Name = "Win_" .. floor
+	ring.Shape = Enum.PartType.Cylinder
+	ring.Size = Vector3.new(1, tube.winRadius * 2, tube.winRadius * 2)
+	ring.CFrame = CFrame.new(0, height, 0) * CFrame.Angles(0, 0, math.rad(90))
+	ring.Material = Enum.Material.Neon
+	ring.Color = Color3.fromRGB(250, 210, 90)
+	ring.Transparency = 0.55
+	ring.CanCollide = false
+	ring.CanQuery = false
+
+	ring:SetAttribute("Floor", floor)
+	CollectionService:AddTag(ring, World.WIN_TAG)
+
+	-- Polka do ladowania, co drugie pietro po przeciwnej stronie rury.
+	local side = if floor % 2 == 0 then 1 else -1
+	local ledge = makeAnchored("Part", model) :: Part
+	ledge.Name = "Ledge"
+	ledge.Size = Vector3.new(tube.ledgeWidth * 2, tube.ledgeThickness, tube.ledgeWidth * 2)
+	ledge.Position = Vector3.new(side * (tube.radius - tube.ledgeWidth), height, 0)
+	ledge.Material = Enum.Material.SmoothPlastic
+	ledge.Color = Color3.fromHSV(hue, 0.45, 0.9)
+	ledge.TopSurface = Enum.SurfaceType.Smooth
+
+	label(ledge, string.format("PIETRO %d · %dm\n+%s WIN", floor, math.floor(height), Format.short(Config.winsForFloor(floor))), 6).Name =
+		"Info"
+end
+
+-- Sciana rury na odcinku jednego pietra. Przezroczysta, zeby bylo widac swiat,
+-- ale kolidujaca, zeby nie dalo sie wypasc bokiem.
+local function buildWallSegment(parent: Folder, floor: number)
+	local tube = Config.Tube
+	local bottom = if floor == 1 then 0 else Config.floorHeight(floor - 1)
+	local top = Config.floorHeight(floor)
+	local height = top - bottom
+	if height <= 0 then
+		return
+	end
+
+	local model = Instance.new("Folder")
+	model.Name = "Wall_" .. floor
+	model.Parent = parent
+
+	local wallRadius = tube.radius + tube.wallThickness / 2
+	for i = 1, tube.wallSegments do
+		local angle = (i - 1) / tube.wallSegments * math.pi * 2
+		local segmentLength = 2 * math.pi * wallRadius / tube.wallSegments + 1
+
+		local panel = makeAnchored("Part", model) :: Part
+		panel.Name = "Panel"
+		panel.Size = Vector3.new(tube.wallThickness, height, segmentLength)
+		panel.CFrame = CFrame.new(math.cos(angle) * wallRadius, bottom + height / 2, math.sin(angle) * wallRadius)
+			* CFrame.Angles(0, -angle, 0)
+		panel.Material = Enum.Material.Glass
+		panel.Color = Color3.fromRGB(150, 190, 230)
+		panel.Transparency = tube.wallTransparency
+		panel.CanQuery = false
+		panel.CastShadow = false
 	end
 end
 
--- Tabliczki z nazwami pulapow, zeby lot mial punkty odniesienia.
-local function buildAltitudeSigns(folder: Folder)
-	for _, band in Config.Altitudes do
-		if band.height <= 0 then
-			continue
-		end
-
-		local sign = makeAnchored("Part", folder) :: Part
-		sign.Name = "Altitude_" .. band.name
-		sign.Size = Vector3.new(1, 1, 1)
-		sign.Position = Vector3.new(26, band.height, 0)
-		sign.Transparency = 1
-		sign.CanCollide = false
-		sign.CanQuery = false
-
-		label(sign, string.format("%s  ·  %dm", band.name, band.height), 0)
+-- Dobudowuje pietra w gore. Wolane przy starcie i potem w miare wznoszenia sie
+-- gracza -- dlatego rura nie ma konca.
+function World.ensureFloors(upTo: number): number
+	local parent = tubeFolder
+	if not parent then
+		return highestFloor
 	end
+
+	while highestFloor < upTo do
+		highestFloor += 1
+		buildWallSegment(parent, highestFloor)
+		buildFloor(parent, highestFloor)
+	end
+	return highestFloor
 end
+
+function World.highestFloor(): number
+	return highestFloor
+end
+
+-- Ktore pietro odpowiada danej wysokosci (0 = ponizej pierwszego).
+function World.floorAtHeight(height: number): number
+	return Config.floorAtHeight(height)
+end
+
+--------------------------------------------------------------------------------
 
 function World.build(): Folder
 	local existing = Workspace:FindFirstChild("FartWorld")
@@ -137,18 +209,25 @@ function World.build(): Folder
 		existing:Destroy()
 	end
 
-	local folder = Instance.new("Folder")
-	folder.Name = "FartWorld"
-	folder.Parent = Workspace
+	highestFloor = 0
 
-	buildSpawn(folder)
-	for index, food in Config.Foods do
-		buildFoodStation(folder, food, index)
+	local root = Instance.new("Folder")
+	root.Name = "FartWorld"
+	root.Parent = Workspace
+
+	buildSpawn(root)
+	for index, zone in Config.Zones do
+		buildZone(root, zone, index, #Config.Zones)
 	end
-	buildRings(folder)
-	buildAltitudeSigns(folder)
 
-	return folder
+	local tube = Instance.new("Folder")
+	tube.Name = "Tube"
+	tube.Parent = root
+	tubeFolder = tube
+
+	World.ensureFloors(Config.Tube.initialFloors)
+
+	return root
 end
 
 return World

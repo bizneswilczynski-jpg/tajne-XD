@@ -7,12 +7,17 @@ local DataStoreService = game:GetService("DataStoreService")
 local RunService = game:GetService("RunService")
 
 export type Profile = {
-	gas: number,
+	farts: number, -- XP; nie zuzywa sie, tylko rosnie
+	wins: number, -- do wydania (dieta)
+	totalWins: number, -- lifetime, odblokowuje strefy
 	fame: number, -- do wydania (dieta)
-	totalFame: number, -- lifetime, odblokowuje jedzenie
+	totalFame: number, -- lifetime, odblokowuje strefy
 	rebirths: number,
 	bestHeight: number,
-	lastFoodId: string?,
+	bestFloor: number,
+	-- Ktore pietra maja juz odebrany WIN. Klucze to numery pietra jako stringi,
+	-- bo DataStore nie przenosi tablic z dziurami.
+	claimedFloors: { [string]: boolean },
 	lastSeen: number,
 }
 
@@ -23,12 +28,15 @@ local store = if RunService:IsStudio() then nil else DataStoreService:GetDataSto
 
 local function defaultProfile(): Profile
 	return {
-		gas = 0,
+		farts = 0,
+		wins = 0,
+		totalWins = 0,
 		fame = 0,
 		totalFame = 0,
 		rebirths = 0,
 		bestHeight = 0,
-		lastFoodId = nil,
+		bestFloor = 0,
+		claimedFloors = {},
 		lastSeen = os.time(),
 	}
 end
@@ -56,10 +64,17 @@ function Data.load(userId: number): Profile
 	-- Scalamy z domyslnymi, zeby dodanie nowego pola nie wywalilo starych zapisow.
 	local profile = defaultProfile()
 	for key, value in result :: any do
-		if profile[key] ~= nil or key == "lastFoodId" then
+		if profile[key] ~= nil then
 			profile[key] = value
 		end
 	end
+
+	-- Pusta tabela zapisana w DataStore wraca jako nil albo jako tablica --
+	-- pilnujemy, zeby claimedFloors zawsze bylo slownikiem.
+	if typeof(profile.claimedFloors) ~= "table" then
+		profile.claimedFloors = {}
+	end
+
 	return profile
 end
 

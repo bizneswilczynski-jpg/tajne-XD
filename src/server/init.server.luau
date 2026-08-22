@@ -2,11 +2,12 @@
 -- +1 FART & FLY -- logika serwera.
 --
 -- Petla:
---   1. Gracz stoi na stolowce -> je -> +GAZ/s (to jest caly AFK).
---   2. PUK -> wydaje CALY gaz -> wystrzal w gore.
---   3. Wysokosc w apogeum (+ zlapane pierscienie) -> SLAWA.
---   4. SLAWA odblokowuje mocniejsze jedzenie i placi za DIETE (rebirth).
---   5. DIETA kasuje gaz i slawe za trwaly mnoznik -> petla od nowa, szybciej.
+--   1. +1 FART co sekunde, zawsze. Strefa pod nogami mnozy to tempo.
+--   2. Farty to XP: wbijaja POZIOM, a poziom podnosi SILE SKOKU.
+--   3. Coraz mocniejszy skok siega coraz wyzszych pieter rury -- kazde pietro
+--      to WIN, raz. Kazdy nowy metr rekordu wysokosci to SLAWA.
+--   4. Strefy i DIETA sa zablokowane obiema walutami naraz.
+--   5. DIETA kasuje postep za trwaly mnoznik tempa -- petla od nowa, szybciej.
 
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
@@ -17,25 +18,14 @@ local Config = require(ReplicatedStorage.Shared.Config)
 local Data = require(script.Data)
 local World = require(script.World)
 
-type Flight = {
-	launchY: number,
-	apexY: number,
-	rings: { [number]: true },
-	startedAt: number,
-	-- Czy postac w ogole oderwala sie od ziemi. Bez tego ladowanie wykrywa sie
-	-- juz w pierwszej klatce po PUKU (gracz nadal stoi na stolowce) i lot
-	-- konczy sie z wynikiem 0 m.
-	airborne: boolean,
-	-- Pozycja z poprzedniej klatki -- pierscienie liczymy jako przeciecie
-	-- odcinka, a nie trafienie w okno +/- kilka studow.
-	lastPosition: Vector3,
-	velocity: number,
-}
-
 type Session = {
 	profile: Data.Profile,
-	flight: Flight?,
 	lastSave: number,
+	level: number,
+	-- Pozycja z poprzedniego ticku. WINY zbieramy jako przeciecie odcinka,
+	-- nie jako trafienie w okno wokol pierscienia -- przy sile skoku 1400
+	-- studow/s gracz mija cale pietro miedzy dwoma tickami.
+	lastPosition: Vector3?,
 }
 
 local sessions: { [Player]: Session } = {}
@@ -48,17 +38,15 @@ local remotes = Instance.new("Folder")
 remotes.Name = "Remotes"
 remotes.Parent = ReplicatedStorage
 
-local pukRemote = Instance.new("RemoteEvent")
-pukRemote.Name = "Puk"
-pukRemote.Parent = remotes
+local function makeRemote(name: string): RemoteEvent
+	local remote = Instance.new("RemoteEvent")
+	remote.Name = name
+	remote.Parent = remotes
+	return remote
+end
 
-local rebirthRemote = Instance.new("RemoteEvent")
-rebirthRemote.Name = "Rebirth"
-rebirthRemote.Parent = remotes
-
-local notifyRemote = Instance.new("RemoteEvent")
-notifyRemote.Name = "Notify"
-notifyRemote.Parent = remotes
+local rebirthRemote = makeRemote("Rebirth")
+local notifyRemote = makeRemote("Notify")
 
 --------------------------------------------------------------------------------
 -- Pomocnicze
@@ -68,18 +56,33 @@ notifyRemote.Parent = remotes
 -- wlasnego kanalu synchronizacji.
 local function pushState(player: Player, session: Session)
 	local profile = session.profile
-	player:SetAttribute("Gas", profile.gas)
+	local level, into, needed = Config.levelFromFarts(profile.farts)
+	session.level = level
+
+	player:SetAttribute("Farts", math.floor(profile.farts))
+	player:SetAttribute("Level", level)
+	player:SetAttribute("LevelProgress", into)
+	player:SetAttribute("LevelNeeded", needed)
+	player:SetAttribute("JumpPower", Config.jumpPower(level, profile.rebirths))
+	player:SetAttribute("Wins", profile.wins)
+	player:SetAttribute("TotalWins", profile.totalWins)
 	player:SetAttribute("Fame", profile.fame)
 	player:SetAttribute("TotalFame", profile.totalFame)
 	player:SetAttribute("Rebirths", profile.rebirths)
 	player:SetAttribute("BestHeight", profile.bestHeight)
+	player:SetAttribute("BestFloor", profile.bestFloor)
 	player:SetAttribute("Multiplier", Config.rebirthMultiplier(profile.rebirths))
-	player:SetAttribute("RebirthCost", Config.rebirthCost(profile.rebirths))
+	player:SetAttribute("RebirthWinCost", Config.rebirthWinCost(profile.rebirths))
+	player:SetAttribute("RebirthFameCost", Config.rebirthFameCost(profile.rebirths))
 
 	local stats = player:FindFirstChild("leaderstats")
 	if stats then
+		local wins = stats:FindFirstChild("WINY") :: IntValue?
 		local fame = stats:FindFirstChild("SLAWA") :: IntValue?
 		local diet = stats:FindFirstChild("DIETA") :: IntValue?
+		if wins then
+			wins.Value = math.floor(math.min(profile.wins, 2 ^ 31 - 1))
+		end
 		if fame then
 			fame.Value = math.floor(math.min(profile.fame, 2 ^ 31 - 1))
 		end
@@ -89,13 +92,14 @@ local function pushState(player: Player, session: Session)
 	end
 end
 
-local function isFoodUnlocked(profile: Data.Profile, food: Config.Food): boolean
-	return profile.totalFame >= food.unlockAt
+-- Strefa wymaga OBU walut naraz.
+local function isZoneUnlocked(profile: Data.Profile, zone: Config.Zone): boolean
+	return profile.totalWins >= zone.unlockWins and profile.totalFame >= zone.unlockFame
 end
 
--- Ktora stolowka jest pod graczem. Raycast w dol jest pewniejszy niz
--- Touched -- nie gubi sie przy staniu w miejscu przez godziny.
-local function foodUnderCharacter(character: Model): Config.Food?
+-- Ktora strefa jest pod graczem. Raycast w dol jest pewniejszy niz Touched --
+-- nie gubi sie przy staniu w miejscu przez godziny.
+local function zoneUnderCharacter(character: Model): Config.Zone?
 	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not root or not humanoid or humanoid.Health <= 0 then
@@ -109,82 +113,62 @@ local function foodUnderCharacter(character: Model): Config.Food?
 	params.FilterType = Enum.RaycastFilterType.Exclude
 	params.FilterDescendantsInstances = { character }
 
-	local result = workspace:Raycast(root.Position, Vector3.new(0, -Config.FOOD_RAY_LENGTH, 0), params)
+	local result = workspace:Raycast(root.Position, Vector3.new(0, -Config.ZONE_RAY_LENGTH, 0), params)
 	if not result then
 		return nil
 	end
 
-	local hit = result.Instance
-	if not CollectionService:HasTag(hit, World.FOOD_TAG) then
+	if not CollectionService:HasTag(result.Instance, World.ZONE_TAG) then
 		return nil
 	end
 
-	local foodId = hit:GetAttribute("FoodId")
-	if typeof(foodId) ~= "string" then
+	local zoneId = result.Instance:GetAttribute("ZoneId")
+	if typeof(zoneId) ~= "string" then
 		return nil
 	end
-	return Config.foodById(foodId)
+	return Config.zoneById(zoneId)
 end
 
 --------------------------------------------------------------------------------
 -- Cykl zycia gracza
 --------------------------------------------------------------------------------
 
-local function grantOfflineGas(player: Player, session: Session)
+local function grantOfflineFarts(player: Player, session: Session)
 	local profile = session.profile
-	local foodId = profile.lastFoodId
-	if not foodId then
-		return
-	end
-
-	local food = Config.foodById(foodId)
-	if not food then
-		return
-	end
 
 	local elapsed = math.clamp(os.time() - profile.lastSeen, 0, Config.OFFLINE_CAP_SECONDS)
 	if elapsed < 60 then
 		return
 	end
 
-	local earned = math.floor(elapsed * food.rate * Config.rebirthMultiplier(profile.rebirths))
+	-- Offline liczymy po bazowym tempie: strefa dziala tylko gdy gracz na niej stoi.
+	local rate = Config.BASE_FART_RATE * Config.rebirthMultiplier(profile.rebirths)
+	local earned = math.floor(elapsed * rate)
 	if earned <= 0 then
 		return
 	end
 
-	profile.gas += earned
-	notifyRemote:FireClient(player, "offline", earned, elapsed, food.name)
+	profile.farts += earned
+	notifyRemote:FireClient(player, "offline", earned, elapsed)
 end
 
 local function onPlayerAdded(player: Player)
 	local profile = Data.load(player.UserId)
-	local session: Session = { profile = profile, flight = nil, lastSave = os.clock() }
+	local session: Session = { profile = profile, lastSave = os.clock(), level = 1, lastPosition = nil }
 	sessions[player] = session
 
 	local stats = Instance.new("Folder")
 	stats.Name = "leaderstats"
 
-	local fame = Instance.new("IntValue")
-	fame.Name = "SLAWA"
-	fame.Parent = stats
-
-	local diet = Instance.new("IntValue")
-	diet.Name = "DIETA"
-	diet.Parent = stats
+	for _, name in { "WINY", "SLAWA", "DIETA" } do
+		local value = Instance.new("IntValue")
+		value.Name = name
+		value.Parent = stats
+	end
 
 	stats.Parent = player
 
-	-- Smierc lub respawn w trakcie lotu zostawilby otwarty Flight z nieaktualnym
-	-- launchY, wiec przy kazdej nowej postaci czyscimy stan lotu.
-	player.CharacterAdded:Connect(function()
-		local current = sessions[player]
-		if current then
-			current.flight = nil
-			player:SetAttribute("FlightHeight", 0)
-		end
-	end)
-
-	grantOfflineGas(player, session)
+	grantOfflineFarts(player, session)
 	pushState(player, session)
 end
 
@@ -198,88 +182,8 @@ local function onPlayerRemoving(player: Player)
 end
 
 --------------------------------------------------------------------------------
--- PUK
+-- DIETA
 --------------------------------------------------------------------------------
-
-local function startFlight(player: Player, session: Session)
-	local profile = session.profile
-	local character = player.Character
-	if not character then
-		return
-	end
-
-	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not root or not humanoid or humanoid.Health <= 0 then
-		return
-	end
-
-	if profile.gas < Config.Launch.minGasToPuk then
-		notifyRemote:FireClient(player, "noGas")
-		return
-	end
-
-	local velocity = Config.launchVelocity(profile.gas)
-	profile.gas = 0
-
-	session.flight = {
-		launchY = root.Position.Y,
-		apexY = root.Position.Y,
-		rings = {},
-		startedAt = os.clock(),
-		airborne = false,
-		lastPosition = root.Position,
-		velocity = velocity,
-	}
-
-	pushState(player, session)
-
-	-- Sam impuls zadaje KLIENT. Postac gracza ma sieciowego wlasciciela po
-	-- stronie klienta, wiec predkosc ustawiona z serwera jest kasowana przy
-	-- najblizszej replikacji fizyki -- zmierzone: 300 studow/s z serwera daje
-	-- 4 study wzniosu, te same 300 z klienta daje 374 study.
-	-- Serwer zostaje sedzia: on decyduje ILE, on liczy wysokosc i SLAWE.
-	notifyRemote:FireClient(player, "puk", velocity)
-end
-
-local function finishFlight(player: Player, session: Session)
-	local flight = session.flight
-	if not flight then
-		return
-	end
-	session.flight = nil
-
-	local profile = session.profile
-	local height = math.max(flight.apexY - flight.launchY, 0)
-
-	-- Impuls zadaje klient, wiec wysokosc trzeba obciac do tego, co przy tej
-	-- predkosci w ogole jest fizycznie mozliwe. Bez tego podmieniony klient
-	-- moglby zglosic dowolne apogeum.
-	local ceiling = flight.velocity ^ 2 / (2 * math.max(workspace.Gravity, 1)) * Config.Flight.heightTolerance
-	height = math.min(height, ceiling)
-
-	local ringCount = 0
-	for _ in flight.rings do
-		ringCount += 1
-	end
-
-	local bonus = 1 + ringCount * Config.Rings.bonusPerRing
-	local earned = math.floor(height * bonus * Config.rebirthMultiplier(profile.rebirths))
-
-	profile.fame += earned
-	profile.totalFame += earned
-	profile.bestHeight = math.max(profile.bestHeight, height)
-
-	pushState(player, session)
-	notifyRemote:FireClient(player, "landed", earned, height, ringCount)
-end
-
-pukRemote.OnServerEvent:Connect(function(player)
-	local session = sessions[player]
-	if session then
-		startFlight(player, session)
-	end
-end)
 
 rebirthRemote.OnServerEvent:Connect(function(player)
 	local session = sessions[player]
@@ -288,147 +192,137 @@ rebirthRemote.OnServerEvent:Connect(function(player)
 	end
 
 	local profile = session.profile
-	local cost = Config.rebirthCost(profile.rebirths)
-	if profile.fame < cost then
-		notifyRemote:FireClient(player, "rebirthTooPoor", cost)
+	local winCost = Config.rebirthWinCost(profile.rebirths)
+	local fameCost = Config.rebirthFameCost(profile.rebirths)
+
+	if profile.wins < winCost or profile.fame < fameCost then
+		notifyRemote:FireClient(player, "rebirthTooPoor", winCost, fameCost)
 		return
 	end
 
-	profile.fame -= cost
+	profile.wins -= winCost
+	profile.fame -= fameCost
 	profile.rebirths += 1
-	profile.gas = 0
+	profile.farts = 0
+	profile.claimedFloors = {}
 
 	pushState(player, session)
 	notifyRemote:FireClient(player, "rebirth", profile.rebirths)
+
+	if player.Character then
+		player.Character:PivotTo(CFrame.new(0, 6, 44))
+	end
 end)
 
 --------------------------------------------------------------------------------
--- Petla glowna
+-- Odbior WINOW z pieter
 --------------------------------------------------------------------------------
 
-local ringParts: { Instance } = {}
+local winPads: { Instance } = {}
 
-local function refreshRings()
-	ringParts = CollectionService:GetTagged(World.RING_TAG)
+local function refreshWinPads()
+	winPads = CollectionService:GetTagged(World.WIN_TAG)
+end
+
+local function claimFloor(player: Player, session: Session, floor: number)
+	local profile = session.profile
+	local key = tostring(floor)
+	if profile.claimedFloors[key] then
+		return
+	end
+
+	profile.claimedFloors[key] = true
+
+	local earned = math.floor(Config.winsForFloor(floor) * Config.rebirthMultiplier(profile.rebirths))
+	profile.wins += earned
+	profile.totalWins += earned
+	profile.bestFloor = math.max(profile.bestFloor, floor)
+
+	pushState(player, session)
+	notifyRemote:FireClient(player, "win", earned, floor)
 end
 
 -- Czy odcinek from->to przebija plaszczyzne pierscienia wewnatrz jego promienia.
--- Sprawdzanie samej odleglosci od srodka nie dziala: przy 200+ studach na
--- sekunde postac przeskakuje caly pierscien miedzy dwiema klatkami.
-local function crossesRing(from: Vector3, to: Vector3, center: Vector3): boolean
+local function crossesRing(from: Vector3, to: Vector3, centerY: number, radius: number): boolean
 	local dy = to.Y - from.Y
 	local point: Vector3
 
 	if math.abs(dy) < 1e-4 then
-		-- Lot praktycznie poziomy: liczymy zwykla odleglosc od plaszczyzny.
-		if math.abs(from.Y - center.Y) > Config.Rings.planeTolerance then
+		-- Ruch praktycznie poziomy: wystarczy bliskosc plaszczyzny.
+		if math.abs(from.Y - centerY) > Config.Tube.ledgeThickness * 2 then
 			return false
 		end
 		point = to
 	else
-		local t = (center.Y - from.Y) / dy
+		local t = (centerY - from.Y) / dy
 		if t < 0 or t > 1 then
 			return false
 		end
 		point = from:Lerp(to, t)
 	end
 
-	local flatPoint = Vector3.new(point.X, 0, point.Z)
-	local flatCenter = Vector3.new(center.X, 0, center.Z)
-	return (flatPoint - flatCenter).Magnitude <= Config.Rings.radius
+	return Vector3.new(point.X, 0, point.Z).Magnitude <= radius
 end
 
-local function trackFlight(session: Session, root: BasePart)
-	local flight = session.flight
-	if not flight then
-		return
-	end
+local function checkWinPads(player: Player, session: Session, position: Vector3)
+	local previous = session.lastPosition or position
+	session.lastPosition = position
 
-	local position = root.Position
-	local previous = flight.lastPosition
-	flight.lastPosition = position
-	flight.apexY = math.max(flight.apexY, position.Y)
-
-	for _, ring in ringParts do
+	for _, ring in winPads do
 		if not ring:IsA("BasePart") then
 			continue
 		end
-		local index = ring:GetAttribute("RingIndex")
-		if typeof(index) ~= "number" or flight.rings[index] then
+		local floor = ring:GetAttribute("Floor")
+		if typeof(floor) ~= "number" then
 			continue
 		end
-
-		if crossesRing(previous, position, ring.Position) then
-			flight.rings[index] = true
-			ring.Transparency = 0.75
-			task.delay(0.6, function()
-				ring.Transparency = 0.35
-			end)
+		if session.profile.claimedFloors[tostring(floor)] then
+			continue
+		end
+		if crossesRing(previous, position, ring.Position.Y, Config.Tube.winRadius) then
+			claimFloor(player, session, floor)
 		end
 	end
 end
 
--- Lot liczymy co klatke; jedzenie wystarczy co Config.EAT_TICK.
-local function updateFlight(player: Player, session: Session, root: BasePart, humanoid: Humanoid, now: number)
-	local flight = session.flight :: Flight
+--------------------------------------------------------------------------------
+-- SLAWA za rekord wysokosci
+--------------------------------------------------------------------------------
 
-	trackFlight(session, root)
-	player:SetAttribute("FlightHeight", root.Position.Y - flight.launchY)
-
-	local airborne = humanoid.FloorMaterial == Enum.Material.Air
-	-- Druga przeslanka poza FloorMaterial: stan Humanoida replikuje sie z
-	-- opoznieniem, a realna zmiana wysokosci nie klamie.
-	if airborne or root.Position.Y - flight.launchY > Config.Flight.airborneHeight then
-		flight.airborne = true
-	end
-
-	local linear = root.AssemblyLinearVelocity
-	local elapsed = now - flight.startedAt
-	local settled = flight.airborne and not airborne and linear.Y <= Config.Flight.settleVelocity
-	local launchFailed = not flight.airborne and elapsed > Config.Flight.launchGrace
-
-	if (settled and elapsed > Config.Flight.minAirtime) or launchFailed or elapsed > Config.Flight.maxDuration then
-		finishFlight(player, session)
-		player:SetAttribute("FlightHeight", 0)
-	end
-end
-
-local function updateEating(player: Player, session: Session, character: Model, step: number)
+local function grantFameForHeight(player: Player, session: Session, height: number)
 	local profile = session.profile
-	local food = foodUnderCharacter(character)
-
-	if food and not isFoodUnlocked(profile, food) then
-		player:SetAttribute("Eating", false)
-		player:SetAttribute("EatingFood", `🔒 {food.name}`)
-		player:SetAttribute("Rate", 0)
-	elseif food then
-		local rate = food.rate * Config.rebirthMultiplier(profile.rebirths)
-		profile.gas += rate * step
-		profile.lastFoodId = food.id
-
-		player:SetAttribute("Eating", true)
-		player:SetAttribute("EatingFood", food.name)
-		player:SetAttribute("Rate", rate)
-		player:SetAttribute("Gas", profile.gas)
-	else
-		player:SetAttribute("Eating", false)
-		player:SetAttribute("EatingFood", "")
-		player:SetAttribute("Rate", 0)
+	if height <= profile.bestHeight then
+		return
 	end
+
+	local gained = height - profile.bestHeight
+	profile.bestHeight = height
+
+	local earned = math.floor(gained * Config.Fame.perStud * Config.rebirthMultiplier(profile.rebirths))
+	if earned <= 0 then
+		return
+	end
+
+	profile.fame += earned
+	profile.totalFame += earned
 end
+
+--------------------------------------------------------------------------------
+-- Petla glowna
+--------------------------------------------------------------------------------
 
 local accumulator = 0
 
 RunService.Heartbeat:Connect(function(deltaTime)
 	accumulator += deltaTime
-
-	local step = 0
-	if accumulator >= Config.EAT_TICK then
-		step = accumulator
-		accumulator = 0
+	if accumulator < Config.FART_TICK then
+		return
 	end
+	local step = accumulator
+	accumulator = 0
 
 	local now = os.clock()
+	local topFloorNeeded = 0
 
 	for player, session in sessions do
 		local character = player.Character
@@ -437,23 +331,58 @@ RunService.Heartbeat:Connect(function(deltaTime)
 		end
 
 		local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		if not root or not humanoid then
+		if not root then
 			continue
 		end
 
-		if session.flight then
-			updateFlight(player, session, root, humanoid, now)
-		end
+		local profile = session.profile
 
-		if step > 0 then
-			updateEating(player, session, character, step)
+		-- Naliczanie fartow. Baza leci zawsze; strefa jest tylko mnoznikiem.
+		local zone = zoneUnderCharacter(character)
+		local zoneMultiplier = 1
+		local zoneName = ""
+		local locked = false
 
-			if now - session.lastSave > Config.AUTOSAVE_INTERVAL then
-				session.lastSave = now
-				task.spawn(Data.save, player.UserId, session.profile)
+		if zone then
+			zoneName = zone.name
+			if isZoneUnlocked(profile, zone) then
+				zoneMultiplier = zone.multiplier
+			else
+				locked = true
 			end
 		end
+
+		local rate = Config.BASE_FART_RATE * zoneMultiplier * Config.rebirthMultiplier(profile.rebirths)
+		profile.farts += rate * step
+
+		player:SetAttribute("Rate", rate)
+		player:SetAttribute("ZoneName", zoneName)
+		player:SetAttribute("ZoneLocked", locked)
+		player:SetAttribute("ZoneMultiplier", zoneMultiplier)
+
+		-- Wysokosc, SLAWA i pietra.
+		local height = root.Position.Y
+		player:SetAttribute("Height", height)
+
+		grantFameForHeight(player, session, height)
+		checkWinPads(player, session, root.Position)
+
+		-- pushState przelicza poziom, wiec sila skoku aktualizuje sie sama.
+		pushState(player, session)
+
+		topFloorNeeded = math.max(topFloorNeeded, World.floorAtHeight(height) + Config.Tube.buildAheadFloors)
+
+		-- Autosave
+		if now - session.lastSave > Config.AUTOSAVE_INTERVAL then
+			session.lastSave = now
+			task.spawn(Data.save, player.UserId, profile)
+		end
+	end
+
+	-- Rura ma nie miec konca: dobudowujemy pietra, zanim gracz dojdzie do szczytu.
+	if topFloorNeeded > World.highestFloor() then
+		World.ensureFloors(World.highestFloor() + Config.Tube.buildBatch)
+		refreshWinPads()
 	end
 end)
 
@@ -464,10 +393,13 @@ end)
 workspace.Gravity = Config.GRAVITY
 
 World.build()
-refreshRings()
-print(`[FartFly] swiat gotowy: {#ringParts} pierscieni, {#Config.Foods} stolowek, grawitacja {workspace.Gravity}`)
-CollectionService:GetInstanceAddedSignal(World.RING_TAG):Connect(refreshRings)
-CollectionService:GetInstanceRemovedSignal(World.RING_TAG):Connect(refreshRings)
+refreshWinPads()
+print(
+	`[FartFly] swiat gotowy: {World.highestFloor()} pieter (pietro 1 na {Config.floorHeight(1)}, `
+		.. `pietro {World.highestFloor()} na {math.floor(Config.floorHeight(World.highestFloor()))}), `
+		.. `{#Config.Zones} stref, grawitacja {workspace.Gravity}, `
+		.. `skok poziom 1 = {math.floor(Config.jumpHeight(Config.jumpPower(1)))} studow`
+)
 
 Players.PlayerAdded:Connect(onPlayerAdded)
 Players.PlayerRemoving:Connect(onPlayerRemoving)
