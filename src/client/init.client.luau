@@ -80,10 +80,10 @@ local function attachPuff(character: Model)
 		NumberSequenceKeypoint.new(0, 0.45),
 		NumberSequenceKeypoint.new(1, 1),
 	})
-	emitter.Size = NumberSequence.new(1.2, 2.6)
-	emitter.Lifetime = NumberRange.new(0.7, 1.1)
-	emitter.Rate = 6
-	emitter.Speed = NumberRange.new(2, 4)
+	emitter.Size = NumberSequence.new(2.2, 5)
+	emitter.Lifetime = NumberRange.new(0.8, 1.3)
+	emitter.Rate = 14
+	emitter.Speed = NumberRange.new(3, 6)
 	emitter.SpreadAngle = Vector2.new(25, 25)
 	emitter.Acceleration = Vector3.new(0, 3, 0)
 	emitter.EmissionDirection = Enum.NormalId.Back
