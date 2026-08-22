@@ -409,7 +409,8 @@ workspace.Gravity = Config.GRAVITY
 
 World.build()
 print(
-	`[FartFly] gotowe: linijka do {Config.markHeight(World.highestMark())} m `
+	`[FartFly] gotowe: mapa {if World.adopted then "z Workspace (recznie edytowalna)" else "zbudowana z kodu"}, `
+		.. `linijka do {Config.markHeight(World.highestMark())} m `
 		.. `(kreska co {Config.Map.markEvery} m), {#Config.Zones} stref, `
 		.. `1 pierd = {math.floor(Config.metersPerFart())} m, grawitacja {workspace.Gravity}`
 )

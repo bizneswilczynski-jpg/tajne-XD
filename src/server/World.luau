@@ -15,6 +15,9 @@ local World = {}
 World.ZONE_TAG = "SpeedZone"
 World.MARK_TAG = "RulerMark"
 
+-- true, jesli mape zastano gotowa w Workspace (a nie zbudowano jej z kodu).
+World.adopted = false
+
 local rulerFolder: Folder? = nil
 local highestMark = 0
 
@@ -179,10 +182,35 @@ end
 
 --------------------------------------------------------------------------------
 
+-- Mapa stoi w Workspace jako zwykle czesci, zeby dalo sie ja przestawiac
+-- i malowac recznie w Studio. Ten kod jej NIE nadpisuje: jesli FartWorld juz
+-- jest, tylko sie do niego podpina. Buduje od zera wylacznie wtedy, gdy mapy
+-- nie ma -- czyli na pustym placu po samym `rojo serve`.
 function World.build(): Folder
 	local existing = Workspace:FindFirstChild("FartWorld")
-	if existing then
-		existing:Destroy()
+	if existing and existing:IsA("Folder") then
+		local ruler = existing:FindFirstChild("Linijka")
+		if not ruler or not ruler:IsA("Folder") then
+			local created = Instance.new("Folder")
+			created.Name = "Linijka"
+			created.Parent = existing
+			ruler = created
+		end
+		rulerFolder = ruler :: Folder
+
+		-- Odtwarzamy licznik z tego, co faktycznie stoi na mapie, zeby
+		-- dobudowywanie ruszylo od wlasciwej kreski.
+		highestMark = 0
+		for _, child in (ruler :: Folder):GetChildren() do
+			local mark = child:GetAttribute("Mark")
+			if typeof(mark) == "number" then
+				highestMark = math.max(highestMark, mark)
+			end
+		end
+
+		World.ensureMarks(math.max(highestMark, Config.Map.initialMarks))
+		World.adopted = true
+		return existing
 	end
 
 	highestMark = 0
@@ -203,6 +231,7 @@ function World.build(): Folder
 
 	World.ensureMarks(Config.Map.initialMarks)
 
+	World.adopted = false
 	return root
 end
 

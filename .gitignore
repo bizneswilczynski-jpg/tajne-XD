@@ -6,4 +6,5 @@ sourcemap.json
 
 # lokalny plik testowy budowany przez rojo build
 FartFly-test.rbxlx
+# FartFly.rbxlx NIE jest ignorowany: to zrodlo recznie edytowanej mapy i HUD
 *.rbxlx.lock

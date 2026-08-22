@@ -1,0 +1,1587 @@
+<roblox version="4">
+  <Item class="Lighting" referent="0">
+    <Properties>
+      <string name="Name">Lighting</string>
+      <Color3 name="Ambient">
+        <R>0.35</R>
+        <G>0.35</G>
+        <B>0.4</B>
+      </Color3>
+      <float name="Brightness">2</float>
+      <float name="ClockTime">15</float>
+    </Properties>
+  </Item>
+  <Item class="ReplicatedStorage" referent="1">
+    <Properties>
+      <string name="Name">ReplicatedStorage</string>
+    </Properties>
+    <Item class="Folder" referent="2">
+      <Properties>
+        <string name="Name">Shared</string>
+      </Properties>
+      <Item class="ModuleScript" referent="3">
+        <Properties>
+          <string name="Name">Config</string>
+          <string name="Source"><![CDATA[--!strict
+-- Centralne strojenie ekonomii +1 FART & FLY.
+-- Wszystkie liczby tutaj -- zero magic numbers w logice gry.
+--
+-- Petla:
+--   1. SPACJA = jeden pierd. Pierd wyrzuca postac w gore -- takze w powietrzu.
+--   2. Kazdy pierd to XP. XP wbija POZIOM.
+--   3. Poziom podnosi MAKSYMALNA LICZBE PIERDOW: poziom 12 = 12 pierdow.
+--      Wyzej lecisz dlatego, ze masz ich WIECEJ, nie dlatego ze sa mocniejsze.
+--   4. Pierdy odnawiaja sie w czasie. Strefa pod nogami przyspiesza odnawianie.
+--   5. Mapa to kwadratowy plac i jedna linijka bez konca, mierzaca metry.
+--      Kreski na linijce daja WINY (raz kazda), rekord wysokosci daje SLAWE.
+
+export type Zone = {
+	id: string,
+	name: string,
+	multiplier: number, -- ile razy szybciej odnawiaja sie pierdy
+	unlockWins: number,
+	unlockFame: number,
+	color: Color3,
+}
+
+local Config = {}
+
+--------------------------------------------------------------------------------
+-- Pierdy: zapas ladunkow skoku
+--------------------------------------------------------------------------------
+
+Config.Farts = {
+	-- Ile pierdow odnawia sie na sekunde na golej podlodze. Strefa to mnozy.
+	regenPerSecond = 1,
+	-- Ile pierdow ma gracz na 1 poziomie. Kazdy poziom dokłada jeden.
+	baseMax = 1,
+	perLevel = 1,
+	-- Minimalny odstep miedzy pierdnieciami, zeby caly zapas nie zszedl w klatce.
+	cooldown = 0.15,
+	-- Czy pierdy odnawiaja sie w powietrzu. false = trzeba wrocic na ziemie,
+	-- co robi z lotu jedna decyzje zamiast nieskonczonego wznoszenia.
+	regenInAir = false,
+}
+
+function Config.maxFarts(level: number): number
+	return Config.Farts.baseMax + (level - 1) * Config.Farts.perLevel
+end
+
+-- Co ile sekund serwer przelicza stan. Nie wplywa na tempo, tylko na plynnosc.
+Config.TICK = 0.1
+
+-- Maksymalny czas offline, za ktory nadrabiamy odnawianie po powrocie.
+Config.OFFLINE_CAP_SECONDS = 8 * 60 * 60
+
+-- Jak czesto serwer zapisuje dane graczy w tle.
+Config.AUTOSAVE_INTERVAL = 120
+
+--------------------------------------------------------------------------------
+-- Sila pierda
+--------------------------------------------------------------------------------
+
+Config.Jump = {
+	-- Predkosc pionowa nadawana jednym pierdem. Pierd USTAWIA predkosc, nie
+	-- dodaje jej -- inaczej seria pierdniec kumulowalaby sie w nieskonczonosc.
+	power = 120,
+}
+
+-- Grawitacja swiata.
+Config.GRAVITY = 120
+
+-- Ile metrow daje jeden pierd wypuszczony w apogeum. Czysto informacyjne.
+function Config.metersPerFart(): number
+	return Config.Jump.power ^ 2 / (2 * Config.GRAVITY)
+end
+
+--------------------------------------------------------------------------------
+-- Poziom (XP z pierdniec)
+--------------------------------------------------------------------------------
+
+Config.Level = {
+	-- Ile XP daje jedno pierdniecie.
+	xpPerFart = 1,
+	-- Koszt wbicia poziomu 2, potem mnozony przez growth.
+	baseXP = 5,
+	growth = 1.3,
+	maxLevel = 5_000,
+}
+
+function Config.xpForLevel(level: number): number
+	if level <= 1 then
+		return 0
+	end
+	return math.floor(Config.Level.baseXP * Config.Level.growth ^ (level - 2))
+end
+
+-- Poziom wyliczany z calkowitego XP. Zwraca poziom, nadwyzke i prog nastepnego.
+function Config.levelFromXP(xp: number): (number, number, number)
+	local level = 1
+	local remaining = xp
+	local needed = Config.xpForLevel(level + 1)
+
+	while remaining >= needed and level < Config.Level.maxLevel do
+		remaining -= needed
+		level += 1
+		needed = Config.xpForLevel(level + 1)
+	end
+
+	return level, remaining, needed
+end
+
+--------------------------------------------------------------------------------
+-- Mapa: plac i linijka
+--------------------------------------------------------------------------------
+
+Config.Map = {
+	-- Kwadratowy plac na dole.
+	padSize = 160,
+	-- Linijka: pionowy slup z podzialka, stojacy przy krawedzi placu.
+	rulerX = 0,
+	rulerZ = -70,
+	rulerWidth = 14,
+	rulerDepth = 4,
+	-- Co ile metrow jest kolejna kreska z etykieta i WINEM.
+	markEvery = 50,
+	-- Ile kresek stoi od razu.
+	initialMarks = 20,
+	-- Gdy gracz zblizy sie na tyle kresek do szczytu, dobudowujemy kolejne --
+	-- stad "linijka bez konca".
+	buildAheadMarks = 8,
+	buildBatch = 12,
+	-- Promien wokol osi placu, w ktorym odbiera sie WIN z kreski.
+	claimRadius = 90,
+}
+
+function Config.markHeight(mark: number): number
+	return mark * Config.Map.markEvery
+end
+
+function Config.markAtHeight(height: number): number
+	if height < Config.Map.markEvery then
+		return 0
+	end
+	return math.floor(height / Config.Map.markEvery)
+end
+
+--------------------------------------------------------------------------------
+-- Strefy przyspieszajace odnawianie
+--------------------------------------------------------------------------------
+
+Config.Zones = {
+	{ id = "beans", name = "Fasola", multiplier = 2, unlockWins = 0, unlockFame = 0, color = Color3.fromRGB(196, 132, 74) },
+	{ id = "cabbage", name = "Kapusta", multiplier = 4, unlockWins = 3, unlockFame = 400, color = Color3.fromRGB(140, 200, 120) },
+	{ id = "egg", name = "Jajko na twardo", multiplier = 8, unlockWins = 8, unlockFame = 3_000, color = Color3.fromRGB(245, 235, 190) },
+	{ id = "kebab", name = "Kebab z budki", multiplier = 16, unlockWins = 18, unlockFame = 12_000, color = Color3.fromRGB(200, 90, 50) },
+	{ id = "milk", name = "Mleko po terminie", multiplier = 32, unlockWins = 32, unlockFame = 60_000, color = Color3.fromRGB(235, 240, 250) },
+	{ id = "zurek", name = "Zurek z zeszlego roku", multiplier = 64, unlockWins = 50, unlockFame = 300_000, color = Color3.fromRGB(215, 200, 150) },
+} :: { Zone }
+
+-- Dlugosc promienia szukajacego strefy pod postacia. HumanoidRootPart siedzi
+-- ~3 study nad ziemia, wiec 10 lapie i R6, i R15.
+Config.ZONE_RAY_LENGTH = 10
+
+--------------------------------------------------------------------------------
+-- WINY -- za kreski na linijce
+--------------------------------------------------------------------------------
+
+Config.Wins = {
+	base = 1,
+	growth = 1.12,
+}
+
+function Config.winsForMark(mark: number): number
+	if mark < 1 then
+		return 0
+	end
+	return math.max(1, math.floor(Config.Wins.base * Config.Wins.growth ^ (mark - 1)))
+end
+
+--------------------------------------------------------------------------------
+-- SLAWA -- za kazdy nowy metr rekordu
+--------------------------------------------------------------------------------
+
+Config.Fame = {
+	perMeter = 4,
+}
+
+--------------------------------------------------------------------------------
+-- DIETA (rebirth) -- kosztuje obie waluty
+--------------------------------------------------------------------------------
+
+Config.Rebirth = {
+	baseWins = 30,
+	baseFame = 1_200,
+	costGrowth = 5,
+	-- Mnoznik do tempa odnawiania pierdow.
+	multiplierPerLevel = 2,
+	-- Mnoznik do sily pojedynczego pierda.
+	jumpMultiplier = 1.35,
+}
+
+function Config.rebirthWinCost(level: number): number
+	return math.floor(Config.Rebirth.baseWins * Config.Rebirth.costGrowth ^ level)
+end
+
+function Config.rebirthFameCost(level: number): number
+	return math.floor(Config.Rebirth.baseFame * Config.Rebirth.costGrowth ^ level)
+end
+
+function Config.rebirthMultiplier(level: number): number
+	return Config.Rebirth.multiplierPerLevel ^ level
+end
+
+function Config.jumpPower(rebirths: number): number
+	return Config.Jump.power * Config.Rebirth.jumpMultiplier ^ rebirths
+end
+
+--------------------------------------------------------------------------------
+-- Pulapy wysokosci -- feedback na HUD, nic nie blokuja.
+--------------------------------------------------------------------------------
+
+Config.Altitudes = {
+	{ height = 0, name = "Podloga" },
+	{ height = 200, name = "Dach" },
+	{ height = 800, name = "Chmury" },
+	{ height = 2_000, name = "Stratosfera" },
+	{ height = 5_000, name = "Orbita" },
+	{ height = 12_000, name = "Kosmos" },
+	{ height = 50_000, name = "Nikt nie wie gdzie to jest" },
+}
+
+function Config.altitudeName(height: number): string
+	local current = Config.Altitudes[1].name
+	for _, band in Config.Altitudes do
+		if height >= band.height then
+			current = band.name
+		end
+	end
+	return current
+end
+
+function Config.zoneById(id: string): Zone?
+	for _, zone in Config.Zones do
+		if zone.id == id then
+			return zone
+		end
+	end
+	return nil
+end
+
+return Config
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="4">
+        <Properties>
+          <string name="Name">Format</string>
+          <string name="Source"><![CDATA[--!strict
+-- Skracanie duzych liczb. Gatunek "+1" bardzo szybko wchodzi w miliardy,
+-- wiec HUD musi to znosic bez rozjezdzania sie.
+
+local Format = {}
+
+local SUFFIXES = { "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc" }
+
+function Format.short(value: number): string
+	if value ~= value or value == math.huge then
+		return "∞"
+	end
+
+	local sign = if value < 0 then "-" else ""
+	value = math.abs(value)
+
+	if value < 1000 then
+		return sign .. tostring(math.floor(value))
+	end
+
+	local tier = math.floor(math.log(value, 1000))
+	tier = math.clamp(tier, 1, #SUFFIXES - 1)
+
+	local scaled = value / 1000 ^ tier
+	local suffix = SUFFIXES[tier + 1]
+
+	if scaled < 10 then
+		return string.format("%s%.2f%s", sign, scaled, suffix)
+	elseif scaled < 100 then
+		return string.format("%s%.1f%s", sign, scaled, suffix)
+	end
+	return string.format("%s%d%s", sign, math.floor(scaled), suffix)
+end
+
+function Format.time(seconds: number): string
+	seconds = math.max(math.floor(seconds), 0)
+	local hours = seconds // 3600
+	local minutes = (seconds % 3600) // 60
+
+	if hours > 0 then
+		return string.format("%dh %dmin", hours, minutes)
+	elseif minutes > 0 then
+		return string.format("%dmin", minutes)
+	end
+	return string.format("%ds", seconds)
+end
+
+return Format
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="5">
+        <Properties>
+          <string name="Name">HudBuilder</string>
+          <string name="Source"><![CDATA[--!strict
+-- Budowniczy HUD-u. Uzywany w dwoch miejscach:
+--   1. jednorazowo, zeby wstawic gotowy ScreenGui do StarterGui -- wtedy da sie
+--      go klikac i stroic recznie w Studio,
+--   2. jako awaryjne wyjscie w kliencie, gdyby kogos HUD-u zabraklo.
+--
+-- Klient NIE tworzy tych elementow sam -- on je tylko ZNAJDUJE po nazwach.
+-- Dlatego nazwy ponizej sa kontraktem: mozna zmieniac kolory, rozmiary,
+-- czcionki i pozycje, ale nie nazwy i nie zagniezdzenie.
+
+local HudBuilder = {}
+
+HudBuilder.GUI_NAME = "FartFlyHUD"
+
+local BROWN = Color3.fromRGB(170, 125, 65)
+local GREEN = Color3.fromRGB(110, 190, 110)
+local GOLD = Color3.fromRGB(250, 210, 90)
+local DARK = Color3.fromRGB(24, 26, 32)
+
+local function corner(parent: Instance, radius: number)
+	local uiCorner = Instance.new("UICorner")
+	uiCorner.CornerRadius = UDim.new(0, radius)
+	uiCorner.Parent = parent
+end
+
+local function panel(parent: Instance, name: string): Frame
+	local frame = Instance.new("Frame")
+	frame.Name = name
+	frame.BackgroundColor3 = DARK
+	frame.BackgroundTransparency = 0.2
+	frame.BorderSizePixel = 0
+	frame.Parent = parent
+	corner(frame, 12)
+	return frame
+end
+
+local function text(parent: Instance, name: string, size: UDim2, position: UDim2): TextLabel
+	local label = Instance.new("TextLabel")
+	label.Name = name
+	label.Size = size
+	label.Position = position
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.FredokaOne
+	label.TextScaled = true
+	label.TextColor3 = Color3.new(1, 1, 1)
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.Text = ""
+	label.Parent = parent
+	return label
+end
+
+function HudBuilder.build(parent: Instance): ScreenGui
+	local screen = Instance.new("ScreenGui")
+	screen.Name = HudBuilder.GUI_NAME
+	screen.ResetOnSpawn = false
+	screen.IgnoreGuiInset = true
+	screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+	-- Licznik pierdow -- duzy, na srodku dolu.
+	local fartCounter = text(screen, "FartCounter", UDim2.fromOffset(560, 66), UDim2.new(0.5, -280, 1, -196))
+	fartCounter.TextXAlignment = Enum.TextXAlignment.Center
+	fartCounter.TextColor3 = BROWN
+	fartCounter.TextStrokeTransparency = 0.2
+	fartCounter.Text = "PIERD: 0/1"
+
+	local heightLabel = text(screen, "Height", UDim2.fromOffset(560, 46), UDim2.new(0.5, -280, 1, -134))
+	heightLabel.TextXAlignment = Enum.TextXAlignment.Center
+	heightLabel.TextStrokeTransparency = 0.3
+	heightLabel.Text = "0 m"
+
+	-- Pasek poziomu na samym dole.
+	local levelBar = panel(screen, "LevelBar")
+	levelBar.Size = UDim2.new(0.62, 0, 0, 40)
+	levelBar.Position = UDim2.new(0.19, 0, 1, -76)
+	levelBar.BackgroundColor3 = Color3.fromRGB(40, 44, 52)
+	levelBar.BackgroundTransparency = 0.15
+
+	local levelFill = Instance.new("Frame")
+	levelFill.Name = "Fill"
+	levelFill.Size = UDim2.fromScale(0, 1)
+	levelFill.BackgroundColor3 = Color3.fromRGB(72, 200, 84)
+	levelFill.BorderSizePixel = 0
+	levelFill.Parent = levelBar
+	corner(levelFill, 12)
+
+	local levelText = text(levelBar, "Text", UDim2.new(1, -24, 1, 0), UDim2.fromOffset(16, 0))
+	levelText.ZIndex = 3
+	levelText.Text = "Poziom 1"
+
+	local levelProgress = text(levelBar, "Progress", UDim2.new(0, 180, 1, 0), UDim2.new(1, -196, 0, 0))
+	levelProgress.TextXAlignment = Enum.TextXAlignment.Right
+	levelProgress.ZIndex = 3
+	levelProgress.Text = "0/5"
+
+	-- Waluty (prawy gorny rog)
+	local wallet = panel(screen, "Wallet")
+	wallet.Size = UDim2.fromOffset(230, 106)
+	wallet.Position = UDim2.new(1, -246, 0, 16)
+
+	local wins = text(wallet, "Wins", UDim2.new(1, -20, 0, 32), UDim2.fromOffset(12, 8))
+	wins.TextColor3 = GOLD
+	wins.Text = "0"
+
+	local fame = text(wallet, "Fame", UDim2.new(1, -20, 0, 28), UDim2.fromOffset(12, 42))
+	fame.TextColor3 = Color3.fromRGB(200, 160, 255)
+	fame.Text = "0"
+
+	local record = text(wallet, "Record", UDim2.new(1, -20, 0, 22), UDim2.fromOffset(12, 74))
+	record.TextColor3 = Color3.fromRGB(180, 180, 190)
+	record.Text = "rekord 0 m"
+
+	-- Strefa (lewy gorny rog)
+	local zone = panel(screen, "Zone")
+	zone.Size = UDim2.fromOffset(280, 68)
+	zone.Position = UDim2.fromOffset(16, 16)
+
+	local zoneTitle = text(zone, "Title", UDim2.new(1, -20, 0, 30), UDim2.fromOffset(12, 8))
+	zoneTitle.TextColor3 = GREEN
+	zoneTitle.Text = "Plac"
+
+	local zoneRate = text(zone, "Rate", UDim2.new(1, -20, 0, 22), UDim2.fromOffset(12, 38))
+	zoneRate.TextColor3 = Color3.fromRGB(180, 180, 190)
+	zoneRate.Text = "+1 pierda/s"
+
+	-- Przycisk DIETY
+	local rebirth = Instance.new("TextButton")
+	rebirth.Name = "Rebirth"
+	rebirth.Size = UDim2.fromOffset(230, 48)
+	rebirth.Position = UDim2.new(1, -246, 0, 132)
+	rebirth.BackgroundColor3 = Color3.fromRGB(90, 70, 140)
+	rebirth.BorderSizePixel = 0
+	rebirth.Font = Enum.Font.FredokaOne
+	rebirth.TextScaled = true
+	rebirth.TextColor3 = Color3.new(1, 1, 1)
+	rebirth.Text = "DIETA"
+	rebirth.Parent = screen
+	corner(rebirth, 10)
+
+	-- Miejsce na komunikaty. Klient wklada tu gotowe kopie Toasts.Template.
+	local toasts = Instance.new("Frame")
+	toasts.Name = "Toasts"
+	toasts.Size = UDim2.fromOffset(400, 300)
+	toasts.Position = UDim2.new(0.5, -200, 0, 90)
+	toasts.BackgroundTransparency = 1
+	toasts.Parent = screen
+
+	local layout = Instance.new("UIListLayout")
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.Padding = UDim.new(0, 6)
+	layout.Parent = toasts
+
+	-- Wzorzec pojedynczego komunikatu. Wylaczony; klient go klonuje.
+	-- Zmieniaj go smialo -- wyglad kazdego komunikatu idzie stad.
+	local template = Instance.new("TextLabel")
+	template.Name = "Template"
+	template.Size = UDim2.fromOffset(400, 36)
+	template.BackgroundColor3 = DARK
+	template.BackgroundTransparency = 0.15
+	template.BorderSizePixel = 0
+	template.Font = Enum.Font.FredokaOne
+	template.TextScaled = true
+	template.TextColor3 = Color3.new(1, 1, 1)
+	template.Text = ""
+	template.Visible = false
+	template.LayoutOrder = -1
+	template.Parent = toasts
+	corner(template, 8)
+
+	screen.Parent = parent
+	return screen
+end
+
+return HudBuilder
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="ServerScriptService" referent="6">
+    <Properties>
+      <string name="Name">ServerScriptService</string>
+    </Properties>
+    <Item class="Script" referent="7">
+      <Properties>
+        <string name="Name">Server</string>
+        <token name="RunContext">0</token>
+        <string name="Source"><![CDATA[--!strict
+-- +1 FART & FLY -- logika serwera.
+--
+-- Petla:
+--   1. SPACJA = jeden pierd, ktory wyrzuca postac w gore. Takze w powietrzu.
+--   2. Kazdy pierd to XP, XP wbija poziom, poziom dokłada JEDEN pierd do zapasu.
+--   3. Pierdy odnawiaja sie w czasie; strefa pod nogami przyspiesza odnawianie.
+--   4. Kreski na linijce daja WINY (raz kazda), rekord wysokosci daje SLAWE.
+--   5. DIETA kasuje postep za trwaly mnoznik -- petla od nowa, szybciej.
+
+local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Data = require(script.Data)
+local World = require(script.World)
+
+type Session = {
+	profile: Data.Profile,
+	lastSave: number,
+	lastFart: number,
+	level: number,
+	-- Pozycja z poprzedniego ticku. Kreski zaliczamy jako przeciecie odcinka:
+	-- przy duzej predkosci gracz mija kreske miedzy dwoma tickami.
+	lastPosition: Vector3?,
+}
+
+local sessions: { [Player]: Session } = {}
+
+--------------------------------------------------------------------------------
+-- Remotes
+--------------------------------------------------------------------------------
+
+local remotes = Instance.new("Folder")
+remotes.Name = "Remotes"
+remotes.Parent = ReplicatedStorage
+
+local function makeRemote(name: string): RemoteEvent
+	local remote = Instance.new("RemoteEvent")
+	remote.Name = name
+	remote.Parent = remotes
+	return remote
+end
+
+-- Klient prosi o pierd; serwer odsyla zgode wraz z sila.
+local fartRemote = makeRemote("Fart")
+local blastRemote = makeRemote("Blast")
+local rebirthRemote = makeRemote("Rebirth")
+local notifyRemote = makeRemote("Notify")
+
+--------------------------------------------------------------------------------
+-- Pomocnicze
+--------------------------------------------------------------------------------
+
+local function pushState(player: Player, session: Session)
+	local profile = session.profile
+	local level, into, needed = Config.levelFromXP(profile.xp)
+	session.level = level
+
+	player:SetAttribute("Farts", math.floor(profile.farts))
+	player:SetAttribute("MaxFarts", Config.maxFarts(level))
+	player:SetAttribute("Level", level)
+	player:SetAttribute("LevelProgress", into)
+	player:SetAttribute("LevelNeeded", needed)
+	player:SetAttribute("Wins", profile.wins)
+	player:SetAttribute("Fame", profile.fame)
+	player:SetAttribute("Rebirths", profile.rebirths)
+	player:SetAttribute("BestHeight", profile.bestHeight)
+	player:SetAttribute("BestMark", profile.bestMark)
+	player:SetAttribute("Multiplier", Config.rebirthMultiplier(profile.rebirths))
+	player:SetAttribute("RebirthWinCost", Config.rebirthWinCost(profile.rebirths))
+	player:SetAttribute("RebirthFameCost", Config.rebirthFameCost(profile.rebirths))
+
+	local stats = player:FindFirstChild("leaderstats")
+	if stats then
+		local wins = stats:FindFirstChild("WINY") :: IntValue?
+		local fame = stats:FindFirstChild("SLAWA") :: IntValue?
+		local diet = stats:FindFirstChild("DIETA") :: IntValue?
+		if wins then
+			wins.Value = math.floor(math.min(profile.wins, 2 ^ 31 - 1))
+		end
+		if fame then
+			fame.Value = math.floor(math.min(profile.fame, 2 ^ 31 - 1))
+		end
+		if diet then
+			diet.Value = profile.rebirths
+		end
+	end
+end
+
+local function isZoneUnlocked(profile: Data.Profile, zone: Config.Zone): boolean
+	return profile.totalWins >= zone.unlockWins and profile.totalFame >= zone.unlockFame
+end
+
+local function zoneUnderCharacter(character: Model): Config.Zone?
+	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not root or not humanoid or humanoid.Health <= 0 then
+		return nil
+	end
+	if humanoid.FloorMaterial == Enum.Material.Air then
+		return nil
+	end
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { character }
+
+	local result = workspace:Raycast(root.Position, Vector3.new(0, -Config.ZONE_RAY_LENGTH, 0), params)
+	if not result or not CollectionService:HasTag(result.Instance, World.ZONE_TAG) then
+		return nil
+	end
+
+	local zoneId = result.Instance:GetAttribute("ZoneId")
+	if typeof(zoneId) ~= "string" then
+		return nil
+	end
+	return Config.zoneById(zoneId)
+end
+
+local function isOnGround(character: Model): boolean
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	return humanoid ~= nil and humanoid.FloorMaterial ~= Enum.Material.Air
+end
+
+--------------------------------------------------------------------------------
+-- Cykl zycia gracza
+--------------------------------------------------------------------------------
+
+local function grantOfflineFarts(player: Player, session: Session)
+	local profile = session.profile
+	local elapsed = math.clamp(os.time() - profile.lastSeen, 0, Config.OFFLINE_CAP_SECONDS)
+	if elapsed < 60 then
+		return
+	end
+
+	local level = Config.levelFromXP(profile.xp)
+	local maxFarts = Config.maxFarts(level)
+	if profile.farts >= maxFarts then
+		return
+	end
+
+	profile.farts = maxFarts
+	notifyRemote:FireClient(player, "offline", elapsed)
+end
+
+local function onPlayerAdded(player: Player)
+	local profile = Data.load(player.UserId)
+	local session: Session = {
+		profile = profile,
+		lastSave = os.clock(),
+		lastFart = 0,
+		level = 1,
+		lastPosition = nil,
+	}
+	sessions[player] = session
+
+	local stats = Instance.new("Folder")
+	stats.Name = "leaderstats"
+	for _, name in { "WINY", "SLAWA", "DIETA" } do
+		local value = Instance.new("IntValue")
+		value.Name = name
+		value.Parent = stats
+	end
+	stats.Parent = player
+
+	grantOfflineFarts(player, session)
+	pushState(player, session)
+end
+
+local function onPlayerRemoving(player: Player)
+	local session = sessions[player]
+	if not session then
+		return
+	end
+	sessions[player] = nil
+	Data.save(player.UserId, session.profile)
+end
+
+--------------------------------------------------------------------------------
+-- Pierd
+--------------------------------------------------------------------------------
+-- Serwer jest sedzia: sprawdza zapas i cooldown, zdejmuje pierd, dolicza XP
+-- i odsyla zgode. Sam impuls zadaje KLIENT -- postac ma sieciowego wlasciciela
+-- po jego stronie, wiec predkosc ustawiona z serwera jest kasowana przy
+-- najblizszej replikacji fizyki (zmierzone: 300 studow/s z serwera daje
+-- 4 study wzniosu, te same 300 z klienta daje 374).
+
+local function tryFart(player: Player, session: Session)
+	local profile = session.profile
+
+	local now = os.clock()
+	if now - session.lastFart < Config.Farts.cooldown then
+		return
+	end
+
+	if profile.farts < 1 then
+		notifyRemote:FireClient(player, "empty")
+		return
+	end
+
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not root or not humanoid or humanoid.Health <= 0 then
+		return
+	end
+
+	profile.farts -= 1
+	session.lastFart = now
+
+	-- Pierd JEST zrodlem XP -- za kazde nacisniecie spacji.
+	profile.xp += Config.Level.xpPerFart
+
+	local levelBefore = session.level
+	pushState(player, session)
+	if session.level > levelBefore then
+		notifyRemote:FireClient(player, "levelUp", session.level, Config.maxFarts(session.level))
+	end
+
+	blastRemote:FireClient(player, Config.jumpPower(profile.rebirths))
+end
+
+fartRemote.OnServerEvent:Connect(function(player)
+	local session = sessions[player]
+	if session then
+		tryFart(player, session)
+	end
+end)
+
+rebirthRemote.OnServerEvent:Connect(function(player)
+	local session = sessions[player]
+	if not session then
+		return
+	end
+
+	local profile = session.profile
+	local winCost = Config.rebirthWinCost(profile.rebirths)
+	local fameCost = Config.rebirthFameCost(profile.rebirths)
+
+	if profile.wins < winCost or profile.fame < fameCost then
+		notifyRemote:FireClient(player, "rebirthTooPoor", winCost, fameCost)
+		return
+	end
+
+	profile.wins -= winCost
+	profile.fame -= fameCost
+	profile.rebirths += 1
+	profile.xp = 0
+	profile.farts = Config.maxFarts(1)
+	profile.claimedMarks = {}
+
+	pushState(player, session)
+	notifyRemote:FireClient(player, "rebirth", profile.rebirths)
+
+	if player.Character then
+		player.Character:PivotTo(CFrame.new(0, 6, 40))
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- Kreski na linijce
+--------------------------------------------------------------------------------
+
+local function claimMark(player: Player, session: Session, mark: number)
+	local profile = session.profile
+	local key = tostring(mark)
+	if profile.claimedMarks[key] then
+		return
+	end
+	profile.claimedMarks[key] = true
+
+	local earned = math.floor(Config.winsForMark(mark) * Config.rebirthMultiplier(profile.rebirths))
+	profile.wins += earned
+	profile.totalWins += earned
+	profile.bestMark = math.max(profile.bestMark, mark)
+
+	notifyRemote:FireClient(player, "mark", earned, mark, Config.markHeight(mark))
+end
+
+-- Zamiast sprawdzac odleglosc od kreski, sprawdzamy czy odcinek przebyty w tym
+-- ticku przecial jej wysokosc. Inaczej szybki lot mijalby kreski niezauwazony.
+local function checkMarks(player: Player, session: Session, position: Vector3)
+	local previous = session.lastPosition or position
+	session.lastPosition = position
+
+	local from = math.min(previous.Y, position.Y)
+	local to = math.max(previous.Y, position.Y)
+	if to < Config.Map.markEvery then
+		return
+	end
+
+	-- Kreska liczy sie tylko nad placem, zeby nie dalo sie jej zebrac z boku.
+	if Vector3.new(position.X, 0, position.Z).Magnitude > Config.Map.claimRadius then
+		return
+	end
+
+	local firstMark = math.max(Config.markAtHeight(from) + (if from % Config.Map.markEvery == 0 then 0 else 1), 1)
+	local lastMark = Config.markAtHeight(to)
+
+	for mark = firstMark, lastMark do
+		claimMark(player, session, mark)
+	end
+end
+
+local function grantFameForHeight(player: Player, session: Session, height: number)
+	local profile = session.profile
+	if height <= profile.bestHeight then
+		return
+	end
+
+	local gained = height - profile.bestHeight
+	profile.bestHeight = height
+
+	local earned = math.floor(gained * Config.Fame.perMeter * Config.rebirthMultiplier(profile.rebirths))
+	if earned > 0 then
+		profile.fame += earned
+		profile.totalFame += earned
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Petla glowna
+--------------------------------------------------------------------------------
+
+local accumulator = 0
+
+RunService.Heartbeat:Connect(function(deltaTime)
+	accumulator += deltaTime
+	if accumulator < Config.TICK then
+		return
+	end
+	local step = accumulator
+	accumulator = 0
+
+	local now = os.clock()
+	local topMarkNeeded = 0
+
+	for player, session in sessions do
+		local character = player.Character
+		if not character then
+			continue
+		end
+
+		local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if not root then
+			continue
+		end
+
+		local profile = session.profile
+		local maxFarts = Config.maxFarts(session.level)
+
+		-- Odnawianie pierdow.
+		local zone = zoneUnderCharacter(character)
+		local zoneMultiplier = 1
+		local zoneName = ""
+		local locked = false
+
+		if zone then
+			zoneName = zone.name
+			if isZoneUnlocked(profile, zone) then
+				zoneMultiplier = zone.multiplier
+			else
+				locked = true
+			end
+		end
+
+		local grounded = isOnGround(character)
+		local regen = 0
+		if grounded or Config.Farts.regenInAir then
+			regen = Config.Farts.regenPerSecond * zoneMultiplier * Config.rebirthMultiplier(profile.rebirths)
+			profile.farts = math.min(profile.farts + regen * step, maxFarts)
+		end
+
+		player:SetAttribute("Regen", regen)
+		player:SetAttribute("ZoneName", zoneName)
+		player:SetAttribute("ZoneLocked", locked)
+		player:SetAttribute("ZoneMultiplier", zoneMultiplier)
+		player:SetAttribute("Grounded", grounded)
+
+		local height = root.Position.Y
+		player:SetAttribute("Height", height)
+
+		grantFameForHeight(player, session, height)
+		checkMarks(player, session, root.Position)
+		pushState(player, session)
+
+		topMarkNeeded = math.max(topMarkNeeded, Config.markAtHeight(height) + Config.Map.buildAheadMarks)
+
+		if now - session.lastSave > Config.AUTOSAVE_INTERVAL then
+			session.lastSave = now
+			task.spawn(Data.save, player.UserId, profile)
+		end
+	end
+
+	-- Linijka ma nie miec konca.
+	if topMarkNeeded > World.highestMark() then
+		World.ensureMarks(World.highestMark() + Config.Map.buildBatch)
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- Start
+--------------------------------------------------------------------------------
+
+workspace.Gravity = Config.GRAVITY
+
+World.build()
+print(
+	`[FartFly] gotowe: mapa {if World.adopted then "z Workspace (recznie edytowalna)" else "zbudowana z kodu"}, `
+		.. `linijka do {Config.markHeight(World.highestMark())} m `
+		.. `(kreska co {Config.Map.markEvery} m), {#Config.Zones} stref, `
+		.. `1 pierd = {math.floor(Config.metersPerFart())} m, grawitacja {workspace.Gravity}`
+)
+
+Players.PlayerAdded:Connect(onPlayerAdded)
+Players.PlayerRemoving:Connect(onPlayerRemoving)
+
+for _, player in Players:GetPlayers() do
+	task.spawn(onPlayerAdded, player)
+end
+
+game:BindToClose(function()
+	for player, session in sessions do
+		Data.save(player.UserId, session.profile)
+	end
+end)
+]]></string>
+      </Properties>
+      <Item class="ModuleScript" referent="8">
+        <Properties>
+          <string name="Name">Data</string>
+          <string name="Source"><![CDATA[--!strict
+-- Minimalna warstwa zapisu. Swiadomie proste: jeden klucz na gracza,
+-- pcall wokol kazdego I/O, autosave + BindToClose.
+-- Przy wiekszej skali warto to podmienic na ProfileStore.
+
+local DataStoreService = game:GetService("DataStoreService")
+local RunService = game:GetService("RunService")
+
+export type Profile = {
+	farts: number, -- aktualny zapas ladunkow skoku
+	xp: number, -- lacznie zdobyte XP (jeden pierd = xpPerFart)
+	wins: number, -- do wydania (dieta)
+	totalWins: number, -- lifetime, odblokowuje strefy
+	fame: number, -- do wydania (dieta)
+	totalFame: number, -- lifetime, odblokowuje strefy
+	rebirths: number,
+	bestHeight: number,
+	bestMark: number,
+	-- Ktore kreski linijki maja juz odebrany WIN. Klucze to numery kresek jako
+	-- stringi, bo DataStore nie przenosi tablic z dziurami.
+	claimedMarks: { [string]: boolean },
+	lastSeen: number,
+}
+
+local Data = {}
+
+local STORE_NAME = "FartFly_v1"
+local store = if RunService:IsStudio() then nil else DataStoreService:GetDataStore(STORE_NAME)
+
+local function defaultProfile(): Profile
+	return {
+		farts = 1,
+		xp = 0,
+		wins = 0,
+		totalWins = 0,
+		fame = 0,
+		totalFame = 0,
+		rebirths = 0,
+		bestHeight = 0,
+		bestMark = 0,
+		claimedMarks = {},
+		lastSeen = os.time(),
+	}
+end
+
+Data.defaultProfile = defaultProfile
+
+function Data.load(userId: number): Profile
+	if not store then
+		return defaultProfile()
+	end
+
+	local ok, result = pcall(function()
+		return store:GetAsync("p_" .. userId)
+	end)
+
+	if not ok then
+		warn(`[FartFly] nie udalo sie wczytac profilu {userId}: {result}`)
+		return defaultProfile()
+	end
+
+	if typeof(result) ~= "table" then
+		return defaultProfile()
+	end
+
+	-- Scalamy z domyslnymi, zeby dodanie nowego pola nie wywalilo starych zapisow.
+	local profile = defaultProfile()
+	for key, value in result :: any do
+		if profile[key] ~= nil then
+			profile[key] = value
+		end
+	end
+
+	-- Pusta tabela zapisana w DataStore wraca jako nil albo jako tablica --
+	-- pilnujemy, zeby claimedMarks zawsze bylo slownikiem.
+	if typeof(profile.claimedMarks) ~= "table" then
+		profile.claimedMarks = {}
+	end
+
+	return profile
+end
+
+function Data.save(userId: number, profile: Profile): boolean
+	if not store then
+		return true
+	end
+
+	profile.lastSeen = os.time()
+
+	local ok, err = pcall(function()
+		store:SetAsync("p_" .. userId, profile)
+	end)
+
+	if not ok then
+		warn(`[FartFly] nie udalo sie zapisac profilu {userId}: {err}`)
+	end
+	return ok
+end
+
+return Data
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="9">
+        <Properties>
+          <string name="Name">World</string>
+          <string name="Source"><![CDATA[--!strict
+-- Buduje mape z kodu, zeby projekt dzialal na pustym placu prosto po `rojo serve`.
+-- Mapa to kwadratowy plac ze strefami i jedna pionowa LINIJKA bez konca.
+-- Linijka ma kreski co Config.Map.markEvery metrow; kazda kreska to WIN.
+
+local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Format = require(ReplicatedStorage.Shared.Format)
+
+local World = {}
+
+World.ZONE_TAG = "SpeedZone"
+World.MARK_TAG = "RulerMark"
+
+-- true, jesli mape zastano gotowa w Workspace (a nie zbudowano jej z kodu).
+World.adopted = false
+
+local rulerFolder: Folder? = nil
+local highestMark = 0
+
+local function makeAnchored(className: string, parent: Instance): any
+	local part = Instance.new(className)
+	part.Anchored = true
+	part.Parent = parent
+	return part
+end
+
+local function label(parent: BasePart, text: string, offsetY: number, size: Vector2?): BillboardGui
+	local gui = Instance.new("BillboardGui")
+	gui.Size = UDim2.fromScale(if size then size.X else 11, if size then size.Y else 3)
+	gui.StudsOffsetWorldSpace = Vector3.new(0, offsetY, 0)
+	gui.AlwaysOnTop = true
+	gui.MaxDistance = 400
+	gui.Parent = parent
+
+	local textLabel = Instance.new("TextLabel")
+	textLabel.Size = UDim2.fromScale(1, 1)
+	textLabel.BackgroundTransparency = 1
+	textLabel.Font = Enum.Font.FredokaOne
+	textLabel.TextScaled = true
+	textLabel.TextColor3 = Color3.new(1, 1, 1)
+	textLabel.TextStrokeTransparency = 0.2
+	textLabel.Text = text
+	textLabel.Parent = gui
+
+	return gui
+end
+
+--------------------------------------------------------------------------------
+-- Plac
+--------------------------------------------------------------------------------
+
+local function buildPad(parent: Folder)
+	local size = Config.Map.padSize
+
+	local pad = makeAnchored("Part", parent) :: Part
+	pad.Name = "Plac"
+	pad.Size = Vector3.new(size, 4, size)
+	pad.Position = Vector3.new(0, -2, 0)
+	pad.Material = Enum.Material.SmoothPlastic
+	pad.Color = Color3.fromRGB(96, 104, 118)
+	pad.TopSurface = Enum.SurfaceType.Smooth
+
+	-- Zielona obwodka dookola placu -- czysto po to, zeby bylo widac krawedz.
+	local rimWidth = 10
+	for i = 1, 4 do
+		local horizontal = i <= 2
+		local sign = if i % 2 == 0 then 1 else -1
+		local rim = makeAnchored("Part", parent) :: Part
+		rim.Name = "Krawedz"
+		rim.Size = if horizontal
+			then Vector3.new(size + rimWidth * 2, 4, rimWidth)
+			else Vector3.new(rimWidth, 4, size + rimWidth * 2)
+		rim.Position = if horizontal
+			then Vector3.new(0, -2, sign * (size + rimWidth) / 2)
+			else Vector3.new(sign * (size + rimWidth) / 2, -2, 0)
+		rim.Material = Enum.Material.SmoothPlastic
+		rim.Color = Color3.fromRGB(88, 200, 72)
+		rim.TopSurface = Enum.SurfaceType.Smooth
+	end
+
+	local spawnLocation = Instance.new("SpawnLocation")
+	spawnLocation.Name = "Start"
+	spawnLocation.Size = Vector3.new(14, 1, 14)
+	spawnLocation.Position = Vector3.new(0, 0.5, 40)
+	spawnLocation.Anchored = true
+	spawnLocation.Color = Color3.fromRGB(120, 200, 120)
+	spawnLocation.TopSurface = Enum.SurfaceType.Smooth
+	spawnLocation.Parent = parent
+end
+
+local function buildZone(parent: Folder, zone: Config.Zone, index: number, total: number)
+	local spacing = 24
+	local originX = -((total - 1) * spacing) / 2
+
+	local pad = makeAnchored("Part", parent) :: Part
+	pad.Name = "Zone_" .. zone.id
+	pad.Size = Vector3.new(18, 1, 18)
+	pad.Position = Vector3.new(originX + (index - 1) * spacing, 0.5, 58)
+	pad.Material = Enum.Material.Neon
+	pad.Color = zone.color
+	pad.TopSurface = Enum.SurfaceType.Smooth
+
+	pad:SetAttribute("ZoneId", zone.id)
+	CollectionService:AddTag(pad, World.ZONE_TAG)
+
+	local locked = zone.unlockWins > 0 or zone.unlockFame > 0
+	local text = if locked
+		then string.format(
+			"%s\nx%s pierdow/s\nLOCK %s WIN + %s SLAWY",
+			zone.name,
+			Format.short(zone.multiplier),
+			Format.short(zone.unlockWins),
+			Format.short(zone.unlockFame)
+		)
+		else string.format("%s\nx%s pierdow/s", zone.name, Format.short(zone.multiplier))
+
+	label(pad, text, 7).Name = "Info"
+end
+
+--------------------------------------------------------------------------------
+-- Linijka
+--------------------------------------------------------------------------------
+-- Jeden segment na kazda kreske: kolorowy blok od poprzedniej kreski do tej,
+-- z etykieta metrow i nagroda. Dokladnie jak podzialka na linijce.
+
+local function buildMark(parent: Folder, mark: number)
+	local map = Config.Map
+	local top = Config.markHeight(mark)
+	local bottom = Config.markHeight(mark - 1)
+	local height = top - bottom
+
+	local segment = makeAnchored("Part", parent) :: Part
+	segment.Name = "Mark_" .. mark
+	segment.Size = Vector3.new(map.rulerWidth, height, map.rulerDepth)
+	segment.Position = Vector3.new(map.rulerX, bottom + height / 2, map.rulerZ)
+	segment.Material = Enum.Material.SmoothPlastic
+	-- Tecza w gore, zeby na pierwszy rzut oka bylo widac jak wysoko sie jest.
+	segment.Color = Color3.fromHSV((mark * 0.045) % 1, 0.85, 1)
+	segment.TopSurface = Enum.SurfaceType.Smooth
+	segment.CanCollide = false
+	segment.CanQuery = false
+
+	segment:SetAttribute("Mark", mark)
+	CollectionService:AddTag(segment, World.MARK_TAG)
+
+	-- Etykieta stoi na gornej krawedzi segmentu, czyli dokladnie na kresce.
+	local tick = makeAnchored("Part", parent) :: Part
+	tick.Name = "Tick_" .. mark
+	tick.Size = Vector3.new(map.rulerWidth + 6, 0.6, map.rulerDepth + 2)
+	tick.Position = Vector3.new(map.rulerX, top, map.rulerZ)
+	tick.Material = Enum.Material.Neon
+	tick.Color = Color3.new(1, 1, 1)
+	tick.Transparency = 0.25
+	tick.CanCollide = false
+	tick.CanQuery = false
+
+	label(tick, string.format("%d m   ·   +%s WIN", math.floor(top), Format.short(Config.winsForMark(mark))), 0, Vector2.new(22, 4)).Name =
+		"Info"
+end
+
+-- Dobudowuje kreski w gore. Wolane przy starcie i w miare wznoszenia sie gracza.
+function World.ensureMarks(upTo: number): number
+	local parent = rulerFolder
+	if not parent then
+		return highestMark
+	end
+
+	while highestMark < upTo do
+		highestMark += 1
+		buildMark(parent, highestMark)
+	end
+	return highestMark
+end
+
+function World.highestMark(): number
+	return highestMark
+end
+
+--------------------------------------------------------------------------------
+
+-- Mapa stoi w Workspace jako zwykle czesci, zeby dalo sie ja przestawiac
+-- i malowac recznie w Studio. Ten kod jej NIE nadpisuje: jesli FartWorld juz
+-- jest, tylko sie do niego podpina. Buduje od zera wylacznie wtedy, gdy mapy
+-- nie ma -- czyli na pustym placu po samym `rojo serve`.
+function World.build(): Folder
+	local existing = Workspace:FindFirstChild("FartWorld")
+	if existing and existing:IsA("Folder") then
+		local ruler = existing:FindFirstChild("Linijka")
+		if not ruler or not ruler:IsA("Folder") then
+			local created = Instance.new("Folder")
+			created.Name = "Linijka"
+			created.Parent = existing
+			ruler = created
+		end
+		rulerFolder = ruler :: Folder
+
+		-- Odtwarzamy licznik z tego, co faktycznie stoi na mapie, zeby
+		-- dobudowywanie ruszylo od wlasciwej kreski.
+		highestMark = 0
+		for _, child in (ruler :: Folder):GetChildren() do
+			local mark = child:GetAttribute("Mark")
+			if typeof(mark) == "number" then
+				highestMark = math.max(highestMark, mark)
+			end
+		end
+
+		World.ensureMarks(math.max(highestMark, Config.Map.initialMarks))
+		World.adopted = true
+		return existing
+	end
+
+	highestMark = 0
+
+	local root = Instance.new("Folder")
+	root.Name = "FartWorld"
+	root.Parent = Workspace
+
+	buildPad(root)
+	for index, zone in Config.Zones do
+		buildZone(root, zone, index, #Config.Zones)
+	end
+
+	local ruler = Instance.new("Folder")
+	ruler.Name = "Linijka"
+	ruler.Parent = root
+	rulerFolder = ruler
+
+	World.ensureMarks(Config.Map.initialMarks)
+
+	World.adopted = false
+	return root
+end
+
+return World
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="StarterPlayer" referent="10">
+    <Properties>
+      <string name="Name">StarterPlayer</string>
+    </Properties>
+    <Item class="StarterPlayerScripts" referent="11">
+      <Properties>
+        <string name="Name">StarterPlayerScripts</string>
+      </Properties>
+      <Item class="LocalScript" referent="12">
+        <Properties>
+          <string name="Name">Client</string>
+          <string name="Source"><![CDATA[--!strict
+-- Klient NIE buduje HUD-u. HUD stoi w StarterGui jako zwykly ScreenGui, wiec
+-- da sie go klikac i stroic recznie w Studio. Ten skrypt tylko go ZNAJDUJE
+-- i wpisuje w niego liczby.
+--
+-- Kontrakt nazw jest w HudBuilder. Kolory, rozmiary, czcionki i pozycje mozna
+-- zmieniac dowolnie; nazwy i zagniezdzenie musza zostac.
+
+local ContextActionService = game:GetService("ContextActionService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+local sharedFolder = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(sharedFolder:WaitForChild("Config"))
+local Format = require(sharedFolder:WaitForChild("Format"))
+local HudBuilder = require(sharedFolder:WaitForChild("HudBuilder"))
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local remotes = ReplicatedStorage:WaitForChild("Remotes")
+local fartRemote = remotes:WaitForChild("Fart") :: RemoteEvent
+local blastRemote = remotes:WaitForChild("Blast") :: RemoteEvent
+local rebirthRemote = remotes:WaitForChild("Rebirth") :: RemoteEvent
+local notifyRemote = remotes:WaitForChild("Notify") :: RemoteEvent
+
+--------------------------------------------------------------------------------
+-- Pierd: wystrzal
+--------------------------------------------------------------------------------
+-- Impuls MUSI polecieciec stad, nie z serwera: postac ma sieciowego wlasciciela
+-- po stronie klienta, wiec AssemblyLinearVelocity ustawione na serwerze jest
+-- kasowane przy najblizszej replikacji fizyki. Serwer decyduje CZY i JAK MOCNO,
+-- klient tylko wykonuje.
+
+local function applyBlast(power: number)
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not root or not humanoid then
+		return
+	end
+
+	-- Humanoid w stanie Running trzyma postac na wysokosci bioder i potrafi
+	-- zjesc impuls w tej samej klatce.
+	humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
+
+	-- Pierd USTAWIA predkosc pionowa, nie dodaje jej. Poziomy ped zostaje,
+	-- zeby dalo sie sterowac lotem.
+	local horizontal = root.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
+	root.AssemblyLinearVelocity = horizontal + Vector3.new(0, power, 0)
+end
+
+blastRemote.OnClientEvent:Connect(applyBlast)
+
+ContextActionService:BindAction("Pierd", function(_, state)
+	if state == Enum.UserInputState.Begin then
+		fartRemote:FireServer()
+	end
+	return Enum.ContextActionResult.Sink
+end, false, Enum.KeyCode.Space, Enum.KeyCode.ButtonA)
+
+-- Zwykly skok Humanoida wylaczony -- caly wznios idzie z pierdow.
+local function disableDefaultJump(character: Model)
+	local humanoid = character:WaitForChild("Humanoid") :: Humanoid
+	humanoid.UseJumpPower = true
+	humanoid.JumpPower = 0
+end
+
+if player.Character then
+	task.spawn(disableDefaultJump, player.Character)
+end
+player.CharacterAdded:Connect(disableDefaultJump)
+
+--------------------------------------------------------------------------------
+-- Znalezienie HUD-u
+--------------------------------------------------------------------------------
+
+-- HUD przychodzi ze StarterGui. Gdyby go tam nie bylo (np. ktos go skasowal),
+-- stawiamy awaryjna kopie, zeby gra dalej dzialala.
+local screen = playerGui:FindFirstChild(HudBuilder.GUI_NAME) :: ScreenGui?
+if not screen then
+	screen = playerGui:WaitForChild(HudBuilder.GUI_NAME, 5) :: ScreenGui?
+end
+if not screen then
+	warn(`[FartFly] brak {HudBuilder.GUI_NAME} w StarterGui -- stawiam awaryjny HUD`)
+	screen = HudBuilder.build(playerGui)
+end
+local hud = screen :: ScreenGui
+
+-- Brakujacy element nie moze wywalic calego skryptu: jesli ktos cos skasuje
+-- w Studio, reszta HUD-u ma dzialac dalej.
+local missing: { [string]: boolean } = {}
+local function find(path: string): any
+	local current: Instance? = hud
+	for name in string.gmatch(path, "[^%.]+") do
+		if not current then
+			break
+		end
+		current = current:FindFirstChild(name)
+	end
+	if not current and not missing[path] then
+		missing[path] = true
+		warn(`[FartFly] w HUD brakuje elementu "{path}" -- ta czesc interfejsu nie bedzie sie aktualizowac`)
+	end
+	return current
+end
+
+local fartCounter = find("FartCounter")
+local heightLabel = find("Height")
+local levelFill = find("LevelBar.Fill")
+local levelText = find("LevelBar.Text")
+local levelProgress = find("LevelBar.Progress")
+local winsValue = find("Wallet.Wins")
+local fameValue = find("Wallet.Fame")
+local recordValue = find("Wallet.Record")
+local zoneTitle = find("Zone.Title")
+local zoneRate = find("Zone.Rate")
+local rebirthButton = find("Rebirth")
+local toastHolder = find("Toasts")
+local toastTemplate = find("Toasts.Template")
+
+--------------------------------------------------------------------------------
+-- Komunikaty
+--------------------------------------------------------------------------------
+
+local function toast(message: string, color: Color3?)
+	if not toastHolder or not toastTemplate then
+		return
+	end
+
+	local label = toastTemplate:Clone()
+	label.Name = "Toast"
+	label.Visible = true
+	label.LayoutOrder = 0
+	label.Text = message
+	if color then
+		label.TextColor3 = color
+	end
+	label.Parent = toastHolder
+
+	task.delay(3, function()
+		local tween = TweenService:Create(label, TweenInfo.new(0.4), {
+			BackgroundTransparency = 1,
+			TextTransparency = 1,
+		})
+		tween.Completed:Connect(function()
+			label:Destroy()
+		end)
+		tween:Play()
+	end)
+end
+
+--------------------------------------------------------------------------------
+-- Odswiezanie
+--------------------------------------------------------------------------------
+
+local BROWN = Color3.fromRGB(170, 125, 65)
+local GREEN = Color3.fromRGB(110, 190, 110)
+local GOLD = Color3.fromRGB(250, 210, 90)
+
+local function number(name: string): number
+	local value = player:GetAttribute(name)
+	return if typeof(value) == "number" then value else 0
+end
+
+local function refresh()
+	local farts = number("Farts")
+	local maxFarts = math.max(number("MaxFarts"), 1)
+
+	if fartCounter then
+		fartCounter.Text = `PIERD: {farts}/{maxFarts}`
+		fartCounter.TextColor3 = if farts > 0 then BROWN else Color3.fromRGB(120, 100, 90)
+	end
+
+	if heightLabel then
+		heightLabel.Text = `{Format.short(number("Height"))} m  ·  {Config.altitudeName(number("Height"))}`
+	end
+
+	local into = number("LevelProgress")
+	local needed = number("LevelNeeded")
+	if levelText then
+		levelText.Text = `Poziom {number("Level")}`
+	end
+	if levelProgress then
+		levelProgress.Text = `{math.floor(into)}/{math.floor(needed)}`
+	end
+	if levelFill then
+		levelFill.Size = UDim2.fromScale(if needed > 0 then math.clamp(into / needed, 0, 1) else 1, 1)
+	end
+
+	if winsValue then
+		winsValue.Text = `🏆 {Format.short(number("Wins"))}`
+	end
+	if fameValue then
+		fameValue.Text = `⭐ {Format.short(number("Fame"))}`
+	end
+	if recordValue then
+		recordValue.Text = `rekord {Format.short(number("BestHeight"))} m · DIETA {number("Rebirths")}`
+	end
+
+	local zoneName = player:GetAttribute("ZoneName")
+	local zoneMultiplier = math.max(number("ZoneMultiplier"), 1)
+	if zoneTitle and zoneRate then
+		if typeof(zoneName) == "string" and zoneName ~= "" then
+			if player:GetAttribute("ZoneLocked") == true then
+				zoneTitle.Text = `🔒 {zoneName}`
+				zoneTitle.TextColor3 = Color3.fromRGB(230, 120, 120)
+				zoneRate.Text = "brak WINOW albo SLAWY"
+			else
+				zoneTitle.Text = zoneName
+				zoneTitle.TextColor3 = GREEN
+				zoneRate.Text = `x{Format.short(zoneMultiplier)} tempa ladowania`
+			end
+		else
+			zoneTitle.Text = "Plac"
+			zoneTitle.TextColor3 = Color3.fromRGB(180, 180, 190)
+			zoneRate.Text = `+{Format.short(number("Regen"))} pierda/s`
+		end
+
+		if player:GetAttribute("Grounded") ~= true then
+			zoneRate.Text = "w powietrzu — nie ladujesz"
+		end
+	end
+
+	if rebirthButton then
+		local winCost = number("RebirthWinCost")
+		local fameCost = number("RebirthFameCost")
+		local canRebirth = number("Wins") >= winCost and number("Fame") >= fameCost
+		rebirthButton.Text = `DIETA · {Format.short(winCost)}🏆 {Format.short(fameCost)}⭐`
+		rebirthButton.BackgroundColor3 = if canRebirth
+			then Color3.fromRGB(130, 95, 200)
+			else Color3.fromRGB(60, 55, 75)
+	end
+end
+
+RunService.RenderStepped:Connect(refresh)
+
+if rebirthButton then
+	rebirthButton.Activated:Connect(function()
+		rebirthRemote:FireServer()
+	end)
+end
+
+--------------------------------------------------------------------------------
+-- Powiadomienia z serwera
+--------------------------------------------------------------------------------
+
+notifyRemote.OnClientEvent:Connect(function(kind: string, ...)
+	local args = { ... }
+
+	if kind == "offline" then
+		toast(`Naladowane do pelna po {Format.time(args[1])}`, BROWN)
+	elseif kind == "levelUp" then
+		toast(`POZIOM {args[1]}! Masz teraz {args[2]} pierdow`, GREEN)
+	elseif kind == "mark" then
+		toast(`{args[3]} m — nowa kreska → +{Format.short(args[1])} 🏆`, GOLD)
+	elseif kind == "empty" then
+		toast("Pusto. Wroc na ziemie i sie naladuj.", Color3.fromRGB(230, 120, 120))
+	elseif kind == "rebirth" then
+		toast(`DIETA {args[1]} — wszystko szybciej i mocniej`, Color3.fromRGB(180, 150, 255))
+	elseif kind == "rebirthTooPoor" then
+		toast(`Brakuje: {Format.short(args[1])}🏆 i {Format.short(args[2])}⭐`, Color3.fromRGB(230, 120, 120))
+	end
+end)
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+</roblox>
