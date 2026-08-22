@@ -214,16 +214,19 @@ local function refresh()
 			else
 				zoneTitle.Text = zoneName
 				zoneTitle.TextColor3 = GREEN
-				zoneRate.Text = `x{Format.short(zoneMultiplier)} tempa ladowania`
+				zoneRate.Text = `wyrzutnia x{Format.short(zoneMultiplier)} XP`
 			end
 		else
 			zoneTitle.Text = "Plac"
 			zoneTitle.TextColor3 = Color3.fromRGB(180, 180, 190)
-			zoneRate.Text = `+{Format.short(number("Regen"))} pierda/s`
+			zoneRate.Text = "stan na strefie, zeby leciec za wiecej XP"
 		end
 
+		-- W locie liczy sie mnoznik z chwili startu, nie to co jest pod nogami.
 		if player:GetAttribute("Grounded") ~= true then
-			zoneRate.Text = "w powietrzu — nie ladujesz"
+			zoneTitle.Text = "W POWIETRZU"
+			zoneTitle.TextColor3 = Color3.fromRGB(140, 200, 255)
+			zoneRate.Text = `lot za x{Format.short(math.max(number("LaunchMultiplier"), 1))} XP`
 		end
 	end
 

@@ -14,7 +14,7 @@
 export type Zone = {
 	id: string,
 	name: string,
-	multiplier: number, -- ile razy szybciej odnawiaja sie pierdy
+	multiplier: number, -- mnoznik XP dla lotu startujacego z tej strefy
 	unlockWins: number,
 	unlockFame: number,
 	color: Color3,
@@ -27,16 +27,14 @@ local Config = {}
 --------------------------------------------------------------------------------
 
 Config.Farts = {
-	-- Ile pierdow odnawia sie na sekunde na golej podlodze. Strefa to mnozy.
-	regenPerSecond = 1,
 	-- Ile pierdow ma gracz na 1 poziomie. Kazdy poziom dokłada jeden.
 	baseMax = 1,
 	perLevel = 1,
 	-- Minimalny odstep miedzy pierdnieciami, zeby caly zapas nie zszedl w klatce.
 	cooldown = 0.15,
-	-- Czy pierdy odnawiaja sie w powietrzu. false = trzeba wrocic na ziemie,
-	-- co robi z lotu jedna decyzje zamiast nieskonczonego wznoszenia.
-	regenInAir = false,
+	-- Zapas wraca w calosci w chwili dotkniecia ziemi -- bez czekania.
+	-- Lot jest wiec jedna decyzja: wystrzelaj wszystko, wylanduj, powtorz.
+	refillOnGround = true,
 }
 
 function Config.maxFarts(level: number): number
@@ -115,7 +113,7 @@ Config.Map = {
 	-- Linijka: pionowy slup z podzialka, stojacy przy krawedzi placu.
 	rulerX = 0,
 	rulerZ = -70,
-	rulerWidth = 14,
+	rulerWidth = 100,
 	rulerDepth = 4,
 	-- Co ile metrow jest kolejna kreska z etykieta i WINEM.
 	markEvery = 50,
@@ -141,8 +139,12 @@ function Config.markAtHeight(height: number): number
 end
 
 --------------------------------------------------------------------------------
--- Strefy przyspieszajace odnawianie
+-- Strefy: mnoznik XP
 --------------------------------------------------------------------------------
+-- Odkad zapas wraca w calosci po ladowaniu, nie ma juz czego przyspieszac --
+-- wiec strefa mnozy XP. Mnoznik zapamietujemy w chwili startu z ziemi i trzyma
+-- przez CALY lot: startujesz z lepszej wyrzutni, caly lot punktuje lepiej.
+-- Kazda strefa wymaga OBU walut naraz.
 
 Config.Zones = {
 	{ id = "beans", name = "Fasola", multiplier = 2, unlockWins = 0, unlockFame = 0, color = Color3.fromRGB(196, 132, 74) },

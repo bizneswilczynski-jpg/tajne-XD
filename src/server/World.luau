@@ -147,19 +147,64 @@ local function buildMark(parent: Folder, mark: number)
 	segment:SetAttribute("Mark", mark)
 	CollectionService:AddTag(segment, World.MARK_TAG)
 
-	-- Etykieta stoi na gornej krawedzi segmentu, czyli dokladnie na kresce.
-	local tick = makeAnchored("Part", parent) :: Part
-	tick.Name = "Tick_" .. mark
-	tick.Size = Vector3.new(map.rulerWidth + 6, 0.6, map.rulerDepth + 2)
-	tick.Position = Vector3.new(map.rulerX, top, map.rulerZ)
-	tick.Material = Enum.Material.Neon
-	tick.Color = Color3.new(1, 1, 1)
-	tick.Transparency = 0.25
-	tick.CanCollide = false
-	tick.CanQuery = false
+	World.paintMark(segment, mark)
+end
 
-	label(tick, string.format("%d m   ·   +%s WIN", math.floor(top), Format.short(Config.winsForMark(mark))), 0, Vector2.new(22, 4)).Name =
-		"Info"
+-- Napis LEZY na scianie bloku (SurfaceGui, nie BillboardGui), duzy i z grubym
+-- czarnym obrysem -- ma sie czytac z daleka i z lotu. Malujemy obie strony,
+-- zeby dzialalo niezaleznie z ktorej strony linijki gracz leci.
+function World.paintMark(segment: BasePart, mark: number)
+	local meters = math.floor(Config.markHeight(mark))
+	local reward = Format.short(Config.winsForMark(mark))
+
+	for _, face in { Enum.NormalId.Front, Enum.NormalId.Back } do
+		local existing = segment:FindFirstChild("Info_" .. face.Name)
+		if existing then
+			existing:Destroy()
+		end
+
+		local gui = Instance.new("SurfaceGui")
+		gui.Name = "Info_" .. face.Name
+		gui.Face = face
+		gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+		-- Nisko celowo: Roblox tnie skalowany tekst na 100 pikseli, wiec im gestsze
+		-- plotno, tym mniejszy napis na scianie. 5 px/stud daje litery na ~20 studow.
+		gui.PixelsPerStud = 5
+		gui.LightInfluence = 0
+		gui.Parent = segment
+
+		local title = Instance.new("TextLabel")
+		title.Name = "Meters"
+		title.Size = UDim2.fromScale(0.92, 0.44)
+		title.Position = UDim2.fromScale(0.04, 0.16)
+		title.BackgroundTransparency = 1
+		title.Font = Enum.Font.FredokaOne
+		title.TextScaled = true
+		title.TextColor3 = Color3.new(1, 1, 1)
+		title.Text = `{meters} m`
+		title.Parent = gui
+
+		local titleStroke = Instance.new("UIStroke")
+		titleStroke.Thickness = 6
+		titleStroke.Color = Color3.new(0, 0, 0)
+		titleStroke.Parent = title
+
+		local reward_label = Instance.new("TextLabel")
+		reward_label.Name = "Reward"
+		reward_label.Size = UDim2.fromScale(0.92, 0.2)
+		reward_label.Position = UDim2.fromScale(0.04, 0.6)
+		reward_label.BackgroundTransparency = 1
+		reward_label.Font = Enum.Font.FredokaOne
+		reward_label.TextScaled = true
+		reward_label.TextColor3 = Color3.fromRGB(255, 233, 150)
+		reward_label.Text = `+{reward} WIN`
+		reward_label.Parent = gui
+
+		local rewardStroke = Instance.new("UIStroke")
+		rewardStroke.Thickness = 4
+		rewardStroke.Color = Color3.new(0, 0, 0)
+		rewardStroke.Parent = reward_label
+	end
 end
 
 -- Dobudowuje kreski w gore. Wolane przy starcie i w miare wznoszenia sie gracza.

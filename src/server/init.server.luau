@@ -22,6 +22,10 @@ type Session = {
 	lastSave: number,
 	lastFart: number,
 	level: number,
+	-- Mnoznik XP zapamietany w chwili startu z ziemi -- obowiazuje do ladowania.
+	launchMultiplier: number,
+	-- Mnoznik strefy, na ktorej gracz aktualnie stoi (1 poza strefami).
+	zoneMultiplier: number,
 	-- Pozycja z poprzedniego ticku. Kreski zaliczamy jako przeciecie odcinka:
 	-- przy duzej predkosci gracz mija kreske miedzy dwoma tickami.
 	lastPosition: Vector3?,
@@ -153,6 +157,8 @@ local function onPlayerAdded(player: Player)
 		lastSave = os.clock(),
 		lastFart = 0,
 		level = 1,
+		launchMultiplier = 1,
+		zoneMultiplier = 1,
 		lastPosition = nil,
 	}
 	sessions[player] = session
@@ -211,8 +217,14 @@ local function tryFart(player: Player, session: Session)
 	profile.farts -= 1
 	session.lastFart = now
 
+	-- Start z ziemi ustala mnoznik XP na caly lot: liczy sie strefa, z ktorej
+	-- wystartowales, a nie to, gdzie akurat jestes w powietrzu.
+	if isOnGround(character :: Model) then
+		session.launchMultiplier = session.zoneMultiplier
+	end
+
 	-- Pierd JEST zrodlem XP -- za kazde nacisniecie spacji.
-	profile.xp += Config.Level.xpPerFart
+	profile.xp += Config.Level.xpPerFart * session.launchMultiplier
 
 	local levelBefore = session.level
 	pushState(player, session)
@@ -367,14 +379,16 @@ RunService.Heartbeat:Connect(function(deltaTime)
 			end
 		end
 
+		session.zoneMultiplier = zoneMultiplier
+
+		-- Dotknales ziemi -- masz z powrotem caly zapas. Bez czekania.
 		local grounded = isOnGround(character)
-		local regen = 0
-		if grounded or Config.Farts.regenInAir then
-			regen = Config.Farts.regenPerSecond * zoneMultiplier * Config.rebirthMultiplier(profile.rebirths)
-			profile.farts = math.min(profile.farts + regen * step, maxFarts)
+		if grounded and Config.Farts.refillOnGround then
+			profile.farts = maxFarts
+			session.launchMultiplier = zoneMultiplier
 		end
 
-		player:SetAttribute("Regen", regen)
+		player:SetAttribute("LaunchMultiplier", session.launchMultiplier)
 		player:SetAttribute("ZoneName", zoneName)
 		player:SetAttribute("ZoneLocked", locked)
 		player:SetAttribute("ZoneMultiplier", zoneMultiplier)
