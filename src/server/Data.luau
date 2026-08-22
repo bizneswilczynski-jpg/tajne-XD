@@ -7,17 +7,18 @@ local DataStoreService = game:GetService("DataStoreService")
 local RunService = game:GetService("RunService")
 
 export type Profile = {
-	farts: number, -- XP; nie zuzywa sie, tylko rosnie
+	farts: number, -- aktualny zapas ladunkow skoku
+	xp: number, -- lacznie zdobyte XP (jeden pierd = xpPerFart)
 	wins: number, -- do wydania (dieta)
 	totalWins: number, -- lifetime, odblokowuje strefy
 	fame: number, -- do wydania (dieta)
 	totalFame: number, -- lifetime, odblokowuje strefy
 	rebirths: number,
 	bestHeight: number,
-	bestFloor: number,
-	-- Ktore pietra maja juz odebrany WIN. Klucze to numery pietra jako stringi,
-	-- bo DataStore nie przenosi tablic z dziurami.
-	claimedFloors: { [string]: boolean },
+	bestMark: number,
+	-- Ktore kreski linijki maja juz odebrany WIN. Klucze to numery kresek jako
+	-- stringi, bo DataStore nie przenosi tablic z dziurami.
+	claimedMarks: { [string]: boolean },
 	lastSeen: number,
 }
 
@@ -28,15 +29,16 @@ local store = if RunService:IsStudio() then nil else DataStoreService:GetDataSto
 
 local function defaultProfile(): Profile
 	return {
-		farts = 0,
+		farts = 1,
+		xp = 0,
 		wins = 0,
 		totalWins = 0,
 		fame = 0,
 		totalFame = 0,
 		rebirths = 0,
 		bestHeight = 0,
-		bestFloor = 0,
-		claimedFloors = {},
+		bestMark = 0,
+		claimedMarks = {},
 		lastSeen = os.time(),
 	}
 end
@@ -70,9 +72,9 @@ function Data.load(userId: number): Profile
 	end
 
 	-- Pusta tabela zapisana w DataStore wraca jako nil albo jako tablica --
-	-- pilnujemy, zeby claimedFloors zawsze bylo slownikiem.
-	if typeof(profile.claimedFloors) ~= "table" then
-		profile.claimedFloors = {}
+	-- pilnujemy, zeby claimedMarks zawsze bylo slownikiem.
+	if typeof(profile.claimedMarks) ~= "table" then
+		profile.claimedMarks = {}
 	end
 
 	return profile

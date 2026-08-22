@@ -2,12 +2,11 @@
 -- +1 FART & FLY -- logika serwera.
 --
 -- Petla:
---   1. +1 FART co sekunde, zawsze. Strefa pod nogami mnozy to tempo.
---   2. Farty to XP: wbijaja POZIOM, a poziom podnosi SILE SKOKU.
---   3. Coraz mocniejszy skok siega coraz wyzszych pieter rury -- kazde pietro
---      to WIN, raz. Kazdy nowy metr rekordu wysokosci to SLAWA.
---   4. Strefy i DIETA sa zablokowane obiema walutami naraz.
---   5. DIETA kasuje postep za trwaly mnoznik tempa -- petla od nowa, szybciej.
+--   1. SPACJA = jeden pierd, ktory wyrzuca postac w gore. Takze w powietrzu.
+--   2. Kazdy pierd to XP, XP wbija poziom, poziom dokłada JEDEN pierd do zapasu.
+--   3. Pierdy odnawiaja sie w czasie; strefa pod nogami przyspiesza odnawianie.
+--   4. Kreski na linijce daja WINY (raz kazda), rekord wysokosci daje SLAWE.
+--   5. DIETA kasuje postep za trwaly mnoznik -- petla od nowa, szybciej.
 
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
@@ -21,10 +20,10 @@ local World = require(script.World)
 type Session = {
 	profile: Data.Profile,
 	lastSave: number,
+	lastFart: number,
 	level: number,
-	-- Pozycja z poprzedniego ticku. WINY zbieramy jako przeciecie odcinka,
-	-- nie jako trafienie w okno wokol pierscienia -- przy sile skoku 1400
-	-- studow/s gracz mija cale pietro miedzy dwoma tickami.
+	-- Pozycja z poprzedniego ticku. Kreski zaliczamy jako przeciecie odcinka:
+	-- przy duzej predkosci gracz mija kreske miedzy dwoma tickami.
 	lastPosition: Vector3?,
 }
 
@@ -45,6 +44,9 @@ local function makeRemote(name: string): RemoteEvent
 	return remote
 end
 
+-- Klient prosi o pierd; serwer odsyla zgode wraz z sila.
+local fartRemote = makeRemote("Fart")
+local blastRemote = makeRemote("Blast")
 local rebirthRemote = makeRemote("Rebirth")
 local notifyRemote = makeRemote("Notify")
 
@@ -52,25 +54,21 @@ local notifyRemote = makeRemote("Notify")
 -- Pomocnicze
 --------------------------------------------------------------------------------
 
--- Stan leci do klienta atrybutami: replikuja sie same, wiec HUD nie potrzebuje
--- wlasnego kanalu synchronizacji.
 local function pushState(player: Player, session: Session)
 	local profile = session.profile
-	local level, into, needed = Config.levelFromFarts(profile.farts)
+	local level, into, needed = Config.levelFromXP(profile.xp)
 	session.level = level
 
 	player:SetAttribute("Farts", math.floor(profile.farts))
+	player:SetAttribute("MaxFarts", Config.maxFarts(level))
 	player:SetAttribute("Level", level)
 	player:SetAttribute("LevelProgress", into)
 	player:SetAttribute("LevelNeeded", needed)
-	player:SetAttribute("JumpPower", Config.jumpPower(level, profile.rebirths))
 	player:SetAttribute("Wins", profile.wins)
-	player:SetAttribute("TotalWins", profile.totalWins)
 	player:SetAttribute("Fame", profile.fame)
-	player:SetAttribute("TotalFame", profile.totalFame)
 	player:SetAttribute("Rebirths", profile.rebirths)
 	player:SetAttribute("BestHeight", profile.bestHeight)
-	player:SetAttribute("BestFloor", profile.bestFloor)
+	player:SetAttribute("BestMark", profile.bestMark)
 	player:SetAttribute("Multiplier", Config.rebirthMultiplier(profile.rebirths))
 	player:SetAttribute("RebirthWinCost", Config.rebirthWinCost(profile.rebirths))
 	player:SetAttribute("RebirthFameCost", Config.rebirthFameCost(profile.rebirths))
@@ -92,13 +90,10 @@ local function pushState(player: Player, session: Session)
 	end
 end
 
--- Strefa wymaga OBU walut naraz.
 local function isZoneUnlocked(profile: Data.Profile, zone: Config.Zone): boolean
 	return profile.totalWins >= zone.unlockWins and profile.totalFame >= zone.unlockFame
 end
 
--- Ktora strefa jest pod graczem. Raycast w dol jest pewniejszy niz Touched --
--- nie gubi sie przy staniu w miejscu przez godziny.
 local function zoneUnderCharacter(character: Model): Config.Zone?
 	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
@@ -114,11 +109,7 @@ local function zoneUnderCharacter(character: Model): Config.Zone?
 	params.FilterDescendantsInstances = { character }
 
 	local result = workspace:Raycast(root.Position, Vector3.new(0, -Config.ZONE_RAY_LENGTH, 0), params)
-	if not result then
-		return nil
-	end
-
-	if not CollectionService:HasTag(result.Instance, World.ZONE_TAG) then
+	if not result or not CollectionService:HasTag(result.Instance, World.ZONE_TAG) then
 		return nil
 	end
 
@@ -129,43 +120,50 @@ local function zoneUnderCharacter(character: Model): Config.Zone?
 	return Config.zoneById(zoneId)
 end
 
+local function isOnGround(character: Model): boolean
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	return humanoid ~= nil and humanoid.FloorMaterial ~= Enum.Material.Air
+end
+
 --------------------------------------------------------------------------------
 -- Cykl zycia gracza
 --------------------------------------------------------------------------------
 
 local function grantOfflineFarts(player: Player, session: Session)
 	local profile = session.profile
-
 	local elapsed = math.clamp(os.time() - profile.lastSeen, 0, Config.OFFLINE_CAP_SECONDS)
 	if elapsed < 60 then
 		return
 	end
 
-	-- Offline liczymy po bazowym tempie: strefa dziala tylko gdy gracz na niej stoi.
-	local rate = Config.BASE_FART_RATE * Config.rebirthMultiplier(profile.rebirths)
-	local earned = math.floor(elapsed * rate)
-	if earned <= 0 then
+	local level = Config.levelFromXP(profile.xp)
+	local maxFarts = Config.maxFarts(level)
+	if profile.farts >= maxFarts then
 		return
 	end
 
-	profile.farts += earned
-	notifyRemote:FireClient(player, "offline", earned, elapsed)
+	profile.farts = maxFarts
+	notifyRemote:FireClient(player, "offline", elapsed)
 end
 
 local function onPlayerAdded(player: Player)
 	local profile = Data.load(player.UserId)
-	local session: Session = { profile = profile, lastSave = os.clock(), level = 1, lastPosition = nil }
+	local session: Session = {
+		profile = profile,
+		lastSave = os.clock(),
+		lastFart = 0,
+		level = 1,
+		lastPosition = nil,
+	}
 	sessions[player] = session
 
 	local stats = Instance.new("Folder")
 	stats.Name = "leaderstats"
-
 	for _, name in { "WINY", "SLAWA", "DIETA" } do
 		local value = Instance.new("IntValue")
 		value.Name = name
 		value.Parent = stats
 	end
-
 	stats.Parent = player
 
 	grantOfflineFarts(player, session)
@@ -182,8 +180,55 @@ local function onPlayerRemoving(player: Player)
 end
 
 --------------------------------------------------------------------------------
--- DIETA
+-- Pierd
 --------------------------------------------------------------------------------
+-- Serwer jest sedzia: sprawdza zapas i cooldown, zdejmuje pierd, dolicza XP
+-- i odsyla zgode. Sam impuls zadaje KLIENT -- postac ma sieciowego wlasciciela
+-- po jego stronie, wiec predkosc ustawiona z serwera jest kasowana przy
+-- najblizszej replikacji fizyki (zmierzone: 300 studow/s z serwera daje
+-- 4 study wzniosu, te same 300 z klienta daje 374).
+
+local function tryFart(player: Player, session: Session)
+	local profile = session.profile
+
+	local now = os.clock()
+	if now - session.lastFart < Config.Farts.cooldown then
+		return
+	end
+
+	if profile.farts < 1 then
+		notifyRemote:FireClient(player, "empty")
+		return
+	end
+
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not root or not humanoid or humanoid.Health <= 0 then
+		return
+	end
+
+	profile.farts -= 1
+	session.lastFart = now
+
+	-- Pierd JEST zrodlem XP -- za kazde nacisniecie spacji.
+	profile.xp += Config.Level.xpPerFart
+
+	local levelBefore = session.level
+	pushState(player, session)
+	if session.level > levelBefore then
+		notifyRemote:FireClient(player, "levelUp", session.level, Config.maxFarts(session.level))
+	end
+
+	blastRemote:FireClient(player, Config.jumpPower(profile.rebirths))
+end
+
+fartRemote.OnServerEvent:Connect(function(player)
+	local session = sessions[player]
+	if session then
+		tryFart(player, session)
+	end
+end)
 
 rebirthRemote.OnServerEvent:Connect(function(player)
 	local session = sessions[player]
@@ -203,91 +248,62 @@ rebirthRemote.OnServerEvent:Connect(function(player)
 	profile.wins -= winCost
 	profile.fame -= fameCost
 	profile.rebirths += 1
-	profile.farts = 0
-	profile.claimedFloors = {}
+	profile.xp = 0
+	profile.farts = Config.maxFarts(1)
+	profile.claimedMarks = {}
 
 	pushState(player, session)
 	notifyRemote:FireClient(player, "rebirth", profile.rebirths)
 
 	if player.Character then
-		player.Character:PivotTo(CFrame.new(0, 6, 44))
+		player.Character:PivotTo(CFrame.new(0, 6, 40))
 	end
 end)
 
 --------------------------------------------------------------------------------
--- Odbior WINOW z pieter
+-- Kreski na linijce
 --------------------------------------------------------------------------------
 
-local winPads: { Instance } = {}
-
-local function refreshWinPads()
-	winPads = CollectionService:GetTagged(World.WIN_TAG)
-end
-
-local function claimFloor(player: Player, session: Session, floor: number)
+local function claimMark(player: Player, session: Session, mark: number)
 	local profile = session.profile
-	local key = tostring(floor)
-	if profile.claimedFloors[key] then
+	local key = tostring(mark)
+	if profile.claimedMarks[key] then
 		return
 	end
+	profile.claimedMarks[key] = true
 
-	profile.claimedFloors[key] = true
-
-	local earned = math.floor(Config.winsForFloor(floor) * Config.rebirthMultiplier(profile.rebirths))
+	local earned = math.floor(Config.winsForMark(mark) * Config.rebirthMultiplier(profile.rebirths))
 	profile.wins += earned
 	profile.totalWins += earned
-	profile.bestFloor = math.max(profile.bestFloor, floor)
+	profile.bestMark = math.max(profile.bestMark, mark)
 
-	pushState(player, session)
-	notifyRemote:FireClient(player, "win", earned, floor)
+	notifyRemote:FireClient(player, "mark", earned, mark, Config.markHeight(mark))
 end
 
--- Czy odcinek from->to przebija plaszczyzne pierscienia wewnatrz jego promienia.
-local function crossesRing(from: Vector3, to: Vector3, centerY: number, radius: number): boolean
-	local dy = to.Y - from.Y
-	local point: Vector3
-
-	if math.abs(dy) < 1e-4 then
-		-- Ruch praktycznie poziomy: wystarczy bliskosc plaszczyzny.
-		if math.abs(from.Y - centerY) > Config.Tube.ledgeThickness * 2 then
-			return false
-		end
-		point = to
-	else
-		local t = (centerY - from.Y) / dy
-		if t < 0 or t > 1 then
-			return false
-		end
-		point = from:Lerp(to, t)
-	end
-
-	return Vector3.new(point.X, 0, point.Z).Magnitude <= radius
-end
-
-local function checkWinPads(player: Player, session: Session, position: Vector3)
+-- Zamiast sprawdzac odleglosc od kreski, sprawdzamy czy odcinek przebyty w tym
+-- ticku przecial jej wysokosc. Inaczej szybki lot mijalby kreski niezauwazony.
+local function checkMarks(player: Player, session: Session, position: Vector3)
 	local previous = session.lastPosition or position
 	session.lastPosition = position
 
-	for _, ring in winPads do
-		if not ring:IsA("BasePart") then
-			continue
-		end
-		local floor = ring:GetAttribute("Floor")
-		if typeof(floor) ~= "number" then
-			continue
-		end
-		if session.profile.claimedFloors[tostring(floor)] then
-			continue
-		end
-		if crossesRing(previous, position, ring.Position.Y, Config.Tube.winRadius) then
-			claimFloor(player, session, floor)
-		end
+	local from = math.min(previous.Y, position.Y)
+	local to = math.max(previous.Y, position.Y)
+	if to < Config.Map.markEvery then
+		return
+	end
+
+	-- Kreska liczy sie tylko nad placem, zeby nie dalo sie jej zebrac z boku.
+	if Vector3.new(position.X, 0, position.Z).Magnitude > Config.Map.claimRadius then
+		return
+	end
+
+	local firstMark = math.max(Config.markAtHeight(from) + (if from % Config.Map.markEvery == 0 then 0 else 1), 1)
+	local lastMark = Config.markAtHeight(to)
+
+	for mark = firstMark, lastMark do
+		claimMark(player, session, mark)
 	end
 end
-
---------------------------------------------------------------------------------
--- SLAWA za rekord wysokosci
---------------------------------------------------------------------------------
 
 local function grantFameForHeight(player: Player, session: Session, height: number)
 	local profile = session.profile
@@ -298,13 +314,11 @@ local function grantFameForHeight(player: Player, session: Session, height: numb
 	local gained = height - profile.bestHeight
 	profile.bestHeight = height
 
-	local earned = math.floor(gained * Config.Fame.perStud * Config.rebirthMultiplier(profile.rebirths))
-	if earned <= 0 then
-		return
+	local earned = math.floor(gained * Config.Fame.perMeter * Config.rebirthMultiplier(profile.rebirths))
+	if earned > 0 then
+		profile.fame += earned
+		profile.totalFame += earned
 	end
-
-	profile.fame += earned
-	profile.totalFame += earned
 end
 
 --------------------------------------------------------------------------------
@@ -315,14 +329,14 @@ local accumulator = 0
 
 RunService.Heartbeat:Connect(function(deltaTime)
 	accumulator += deltaTime
-	if accumulator < Config.FART_TICK then
+	if accumulator < Config.TICK then
 		return
 	end
 	local step = accumulator
 	accumulator = 0
 
 	local now = os.clock()
-	local topFloorNeeded = 0
+	local topMarkNeeded = 0
 
 	for player, session in sessions do
 		local character = player.Character
@@ -336,8 +350,9 @@ RunService.Heartbeat:Connect(function(deltaTime)
 		end
 
 		local profile = session.profile
+		local maxFarts = Config.maxFarts(session.level)
 
-		-- Naliczanie fartow. Baza leci zawsze; strefa jest tylko mnoznikiem.
+		-- Odnawianie pierdow.
 		local zone = zoneUnderCharacter(character)
 		local zoneMultiplier = 1
 		local zoneName = ""
@@ -352,37 +367,37 @@ RunService.Heartbeat:Connect(function(deltaTime)
 			end
 		end
 
-		local rate = Config.BASE_FART_RATE * zoneMultiplier * Config.rebirthMultiplier(profile.rebirths)
-		profile.farts += rate * step
+		local grounded = isOnGround(character)
+		local regen = 0
+		if grounded or Config.Farts.regenInAir then
+			regen = Config.Farts.regenPerSecond * zoneMultiplier * Config.rebirthMultiplier(profile.rebirths)
+			profile.farts = math.min(profile.farts + regen * step, maxFarts)
+		end
 
-		player:SetAttribute("Rate", rate)
+		player:SetAttribute("Regen", regen)
 		player:SetAttribute("ZoneName", zoneName)
 		player:SetAttribute("ZoneLocked", locked)
 		player:SetAttribute("ZoneMultiplier", zoneMultiplier)
+		player:SetAttribute("Grounded", grounded)
 
-		-- Wysokosc, SLAWA i pietra.
 		local height = root.Position.Y
 		player:SetAttribute("Height", height)
 
 		grantFameForHeight(player, session, height)
-		checkWinPads(player, session, root.Position)
-
-		-- pushState przelicza poziom, wiec sila skoku aktualizuje sie sama.
+		checkMarks(player, session, root.Position)
 		pushState(player, session)
 
-		topFloorNeeded = math.max(topFloorNeeded, World.floorAtHeight(height) + Config.Tube.buildAheadFloors)
+		topMarkNeeded = math.max(topMarkNeeded, Config.markAtHeight(height) + Config.Map.buildAheadMarks)
 
-		-- Autosave
 		if now - session.lastSave > Config.AUTOSAVE_INTERVAL then
 			session.lastSave = now
 			task.spawn(Data.save, player.UserId, profile)
 		end
 	end
 
-	-- Rura ma nie miec konca: dobudowujemy pietra, zanim gracz dojdzie do szczytu.
-	if topFloorNeeded > World.highestFloor() then
-		World.ensureFloors(World.highestFloor() + Config.Tube.buildBatch)
-		refreshWinPads()
+	-- Linijka ma nie miec konca.
+	if topMarkNeeded > World.highestMark() then
+		World.ensureMarks(World.highestMark() + Config.Map.buildBatch)
 	end
 end)
 
@@ -393,12 +408,10 @@ end)
 workspace.Gravity = Config.GRAVITY
 
 World.build()
-refreshWinPads()
 print(
-	`[FartFly] swiat gotowy: {World.highestFloor()} pieter (pietro 1 na {Config.floorHeight(1)}, `
-		.. `pietro {World.highestFloor()} na {math.floor(Config.floorHeight(World.highestFloor()))}), `
-		.. `{#Config.Zones} stref, grawitacja {workspace.Gravity}, `
-		.. `skok poziom 1 = {math.floor(Config.jumpHeight(Config.jumpPower(1)))} studow`
+	`[FartFly] gotowe: linijka do {Config.markHeight(World.highestMark())} m `
+		.. `(kreska co {Config.Map.markEvery} m), {#Config.Zones} stref, `
+		.. `1 pierd = {math.floor(Config.metersPerFart())} m, grawitacja {workspace.Gravity}`
 )
 
 Players.PlayerAdded:Connect(onPlayerAdded)

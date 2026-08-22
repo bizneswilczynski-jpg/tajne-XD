@@ -1,7 +1,7 @@
 --!strict
 -- Buduje mape z kodu, zeby projekt dzialal na pustym placu prosto po `rojo serve`.
--- Nic tutaj nie jest swiete -- docelowo strefy i pietra moga byc recznie
--- postawionymi modelami, logika szuka ich po tagach/atrybutach.
+-- Mapa to kwadratowy plac ze strefami i jedna pionowa LINIJKA bez konca.
+-- Linijka ma kreski co Config.Map.markEvery metrow; kazda kreska to WIN.
 
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -13,12 +13,10 @@ local Format = require(ReplicatedStorage.Shared.Format)
 local World = {}
 
 World.ZONE_TAG = "SpeedZone"
-World.WIN_TAG = "WinPad"
+World.MARK_TAG = "RulerMark"
 
-local SPAWN_SIZE = Vector3.new(120, 4, 120)
-
-local tubeFolder: Folder? = nil
-local highestFloor = 0
+local rulerFolder: Folder? = nil
+local highestMark = 0
 
 local function makeAnchored(className: string, parent: Instance): any
 	local part = Instance.new(className)
@@ -27,12 +25,12 @@ local function makeAnchored(className: string, parent: Instance): any
 	return part
 end
 
-local function label(parent: BasePart, text: string, offsetY: number): BillboardGui
+local function label(parent: BasePart, text: string, offsetY: number, size: Vector2?): BillboardGui
 	local gui = Instance.new("BillboardGui")
-	gui.Size = UDim2.fromScale(11, 3)
+	gui.Size = UDim2.fromScale(if size then size.X else 11, if size then size.Y else 3)
 	gui.StudsOffsetWorldSpace = Vector3.new(0, offsetY, 0)
 	gui.AlwaysOnTop = true
-	gui.MaxDistance = 260
+	gui.MaxDistance = 400
 	gui.Parent = parent
 
 	local textLabel = Instance.new("TextLabel")
@@ -49,39 +47,56 @@ local function label(parent: BasePart, text: string, offsetY: number): Billboard
 end
 
 --------------------------------------------------------------------------------
--- Dol: spawn i strefy przyspieszajace
+-- Plac
 --------------------------------------------------------------------------------
 
-local function buildSpawn(parent: Folder)
+local function buildPad(parent: Folder)
+	local size = Config.Map.padSize
+
 	local pad = makeAnchored("Part", parent) :: Part
-	pad.Name = "SpawnPad"
-	pad.Size = SPAWN_SIZE
+	pad.Name = "Plac"
+	pad.Size = Vector3.new(size, 4, size)
 	pad.Position = Vector3.new(0, -2, 0)
 	pad.Material = Enum.Material.SmoothPlastic
-	pad.Color = Color3.fromRGB(70, 80, 95)
+	pad.Color = Color3.fromRGB(96, 104, 118)
 	pad.TopSurface = Enum.SurfaceType.Smooth
+
+	-- Zielona obwodka dookola placu -- czysto po to, zeby bylo widac krawedz.
+	local rimWidth = 10
+	for i = 1, 4 do
+		local horizontal = i <= 2
+		local sign = if i % 2 == 0 then 1 else -1
+		local rim = makeAnchored("Part", parent) :: Part
+		rim.Name = "Krawedz"
+		rim.Size = if horizontal
+			then Vector3.new(size + rimWidth * 2, 4, rimWidth)
+			else Vector3.new(rimWidth, 4, size + rimWidth * 2)
+		rim.Position = if horizontal
+			then Vector3.new(0, -2, sign * (size + rimWidth) / 2)
+			else Vector3.new(sign * (size + rimWidth) / 2, -2, 0)
+		rim.Material = Enum.Material.SmoothPlastic
+		rim.Color = Color3.fromRGB(88, 200, 72)
+		rim.TopSurface = Enum.SurfaceType.Smooth
+	end
 
 	local spawnLocation = Instance.new("SpawnLocation")
 	spawnLocation.Name = "Start"
-	spawnLocation.Size = Vector3.new(12, 1, 12)
-	spawnLocation.Position = Vector3.new(0, 0.5, 44)
+	spawnLocation.Size = Vector3.new(14, 1, 14)
+	spawnLocation.Position = Vector3.new(0, 0.5, 40)
 	spawnLocation.Anchored = true
 	spawnLocation.Color = Color3.fromRGB(120, 200, 120)
 	spawnLocation.TopSurface = Enum.SurfaceType.Smooth
 	spawnLocation.Parent = parent
 end
 
--- Strefy stoja w luku wokol wlotu rury, zeby zadna nie zaslaniala srodka.
 local function buildZone(parent: Folder, zone: Config.Zone, index: number, total: number)
-	local spread = math.rad(210)
-	local startAngle = math.rad(165)
-	local angle = startAngle + (if total > 1 then (index - 1) / (total - 1) * spread else spread / 2)
-	local distance = Config.Tube.radius + 22
+	local spacing = 24
+	local originX = -((total - 1) * spacing) / 2
 
 	local pad = makeAnchored("Part", parent) :: Part
 	pad.Name = "Zone_" .. zone.id
-	pad.Size = Vector3.new(14, 1, 14)
-	pad.Position = Vector3.new(math.cos(angle) * distance, 0.5, math.sin(angle) * distance)
+	pad.Size = Vector3.new(18, 1, 18)
+	pad.Position = Vector3.new(originX + (index - 1) * spacing, 0.5, 58)
 	pad.Material = Enum.Material.Neon
 	pad.Color = zone.color
 	pad.TopSurface = Enum.SurfaceType.Smooth
@@ -92,120 +107,74 @@ local function buildZone(parent: Folder, zone: Config.Zone, index: number, total
 	local locked = zone.unlockWins > 0 or zone.unlockFame > 0
 	local text = if locked
 		then string.format(
-			"%s\nx%s tempa\nLOCK %s WIN + %s SLAWY",
+			"%s\nx%s pierdow/s\nLOCK %s WIN + %s SLAWY",
 			zone.name,
 			Format.short(zone.multiplier),
 			Format.short(zone.unlockWins),
 			Format.short(zone.unlockFame)
 		)
-		else string.format("%s\nx%s tempa", zone.name, Format.short(zone.multiplier))
+		else string.format("%s\nx%s pierdow/s", zone.name, Format.short(zone.multiplier))
 
-	label(pad, text, 6).Name = "Info"
+	label(pad, text, 7).Name = "Info"
 end
 
 --------------------------------------------------------------------------------
--- Rura
+-- Linijka
 --------------------------------------------------------------------------------
+-- Jeden segment na kazda kreske: kolorowy blok od poprzedniej kreski do tej,
+-- z etykieta metrow i nagroda. Dokladnie jak podzialka na linijce.
 
--- Pietro sklada sie z dwoch rzeczy:
---   * pierscienia WIN na osi rury -- zbieranego W LOCIE, bez ladowania,
---   * polki przy scianie -- opcjonalnego miejsca na odpoczynek i kolejny skok.
--- Srodek rury zostaje przelotowy, wiec mocny skok moze minac wiele pieter naraz
--- i zebrac po drodze wszystkie WINY.
-local function buildFloor(parent: Folder, floor: number)
-	local tube = Config.Tube
-	local height = Config.floorHeight(floor)
-	local hue = (floor * 0.11) % 1
+local function buildMark(parent: Folder, mark: number)
+	local map = Config.Map
+	local top = Config.markHeight(mark)
+	local bottom = Config.markHeight(mark - 1)
+	local height = top - bottom
 
-	local model = Instance.new("Folder")
-	model.Name = "Floor_" .. floor
-	model.Parent = parent
+	local segment = makeAnchored("Part", parent) :: Part
+	segment.Name = "Mark_" .. mark
+	segment.Size = Vector3.new(map.rulerWidth, height, map.rulerDepth)
+	segment.Position = Vector3.new(map.rulerX, bottom + height / 2, map.rulerZ)
+	segment.Material = Enum.Material.SmoothPlastic
+	-- Tecza w gore, zeby na pierwszy rzut oka bylo widac jak wysoko sie jest.
+	segment.Color = Color3.fromHSV((mark * 0.045) % 1, 0.85, 1)
+	segment.TopSurface = Enum.SurfaceType.Smooth
+	segment.CanCollide = false
+	segment.CanQuery = false
 
-	-- Pierscien WIN: plaski dysk na osi, bez kolizji i bez udzialu w raycastach.
-	local ring = makeAnchored("Part", model) :: Part
-	ring.Name = "Win_" .. floor
-	ring.Shape = Enum.PartType.Cylinder
-	ring.Size = Vector3.new(1, tube.winRadius * 2, tube.winRadius * 2)
-	ring.CFrame = CFrame.new(0, height, 0) * CFrame.Angles(0, 0, math.rad(90))
-	ring.Material = Enum.Material.Neon
-	ring.Color = Color3.fromRGB(250, 210, 90)
-	ring.Transparency = 0.55
-	ring.CanCollide = false
-	ring.CanQuery = false
+	segment:SetAttribute("Mark", mark)
+	CollectionService:AddTag(segment, World.MARK_TAG)
 
-	ring:SetAttribute("Floor", floor)
-	CollectionService:AddTag(ring, World.WIN_TAG)
+	-- Etykieta stoi na gornej krawedzi segmentu, czyli dokladnie na kresce.
+	local tick = makeAnchored("Part", parent) :: Part
+	tick.Name = "Tick_" .. mark
+	tick.Size = Vector3.new(map.rulerWidth + 6, 0.6, map.rulerDepth + 2)
+	tick.Position = Vector3.new(map.rulerX, top, map.rulerZ)
+	tick.Material = Enum.Material.Neon
+	tick.Color = Color3.new(1, 1, 1)
+	tick.Transparency = 0.25
+	tick.CanCollide = false
+	tick.CanQuery = false
 
-	-- Polka do ladowania, co drugie pietro po przeciwnej stronie rury.
-	local side = if floor % 2 == 0 then 1 else -1
-	local ledge = makeAnchored("Part", model) :: Part
-	ledge.Name = "Ledge"
-	ledge.Size = Vector3.new(tube.ledgeWidth * 2, tube.ledgeThickness, tube.ledgeWidth * 2)
-	ledge.Position = Vector3.new(side * (tube.radius - tube.ledgeWidth), height, 0)
-	ledge.Material = Enum.Material.SmoothPlastic
-	ledge.Color = Color3.fromHSV(hue, 0.45, 0.9)
-	ledge.TopSurface = Enum.SurfaceType.Smooth
-
-	label(ledge, string.format("PIETRO %d · %dm\n+%s WIN", floor, math.floor(height), Format.short(Config.winsForFloor(floor))), 6).Name =
+	label(tick, string.format("%d m   ·   +%s WIN", math.floor(top), Format.short(Config.winsForMark(mark))), 0, Vector2.new(22, 4)).Name =
 		"Info"
 end
 
--- Sciana rury na odcinku jednego pietra. Przezroczysta, zeby bylo widac swiat,
--- ale kolidujaca, zeby nie dalo sie wypasc bokiem.
-local function buildWallSegment(parent: Folder, floor: number)
-	local tube = Config.Tube
-	local bottom = if floor == 1 then 0 else Config.floorHeight(floor - 1)
-	local top = Config.floorHeight(floor)
-	local height = top - bottom
-	if height <= 0 then
-		return
-	end
-
-	local model = Instance.new("Folder")
-	model.Name = "Wall_" .. floor
-	model.Parent = parent
-
-	local wallRadius = tube.radius + tube.wallThickness / 2
-	for i = 1, tube.wallSegments do
-		local angle = (i - 1) / tube.wallSegments * math.pi * 2
-		local segmentLength = 2 * math.pi * wallRadius / tube.wallSegments + 1
-
-		local panel = makeAnchored("Part", model) :: Part
-		panel.Name = "Panel"
-		panel.Size = Vector3.new(tube.wallThickness, height, segmentLength)
-		panel.CFrame = CFrame.new(math.cos(angle) * wallRadius, bottom + height / 2, math.sin(angle) * wallRadius)
-			* CFrame.Angles(0, -angle, 0)
-		panel.Material = Enum.Material.Glass
-		panel.Color = Color3.fromRGB(150, 190, 230)
-		panel.Transparency = tube.wallTransparency
-		panel.CanQuery = false
-		panel.CastShadow = false
-	end
-end
-
--- Dobudowuje pietra w gore. Wolane przy starcie i potem w miare wznoszenia sie
--- gracza -- dlatego rura nie ma konca.
-function World.ensureFloors(upTo: number): number
-	local parent = tubeFolder
+-- Dobudowuje kreski w gore. Wolane przy starcie i w miare wznoszenia sie gracza.
+function World.ensureMarks(upTo: number): number
+	local parent = rulerFolder
 	if not parent then
-		return highestFloor
+		return highestMark
 	end
 
-	while highestFloor < upTo do
-		highestFloor += 1
-		buildWallSegment(parent, highestFloor)
-		buildFloor(parent, highestFloor)
+	while highestMark < upTo do
+		highestMark += 1
+		buildMark(parent, highestMark)
 	end
-	return highestFloor
+	return highestMark
 end
 
-function World.highestFloor(): number
-	return highestFloor
-end
-
--- Ktore pietro odpowiada danej wysokosci (0 = ponizej pierwszego).
-function World.floorAtHeight(height: number): number
-	return Config.floorAtHeight(height)
+function World.highestMark(): number
+	return highestMark
 end
 
 --------------------------------------------------------------------------------
@@ -216,23 +185,23 @@ function World.build(): Folder
 		existing:Destroy()
 	end
 
-	highestFloor = 0
+	highestMark = 0
 
 	local root = Instance.new("Folder")
 	root.Name = "FartWorld"
 	root.Parent = Workspace
 
-	buildSpawn(root)
+	buildPad(root)
 	for index, zone in Config.Zones do
 		buildZone(root, zone, index, #Config.Zones)
 	end
 
-	local tube = Instance.new("Folder")
-	tube.Name = "Tube"
-	tube.Parent = root
-	tubeFolder = tube
+	local ruler = Instance.new("Folder")
+	ruler.Name = "Linijka"
+	ruler.Parent = root
+	rulerFolder = ruler
 
-	World.ensureFloors(Config.Tube.initialFloors)
+	World.ensureMarks(Config.Map.initialMarks)
 
 	return root
 end
