@@ -64,17 +64,55 @@ ContextActionService:BindAction("Pierd", function(_, state)
 	return Enum.ContextActionResult.Sink
 end, false, Enum.KeyCode.Space, Enum.KeyCode.ButtonA)
 
+--------------------------------------------------------------------------------
+-- Baczki: widoczny oblok, gdy postac zarabia stojac na strefie
+--------------------------------------------------------------------------------
+
+local function attachPuff(character: Model)
+	local root = character:WaitForChild("HumanoidRootPart") :: BasePart
+
+	local emitter = Instance.new("ParticleEmitter")
+	emitter.Name = "Baczki"
+	-- Wbudowana tekstura Roblox -- zero zewnetrznych assetow do wgrywania.
+	emitter.Texture = "rbxasset://textures/particles/smoke_main.dds"
+	emitter.Color = ColorSequence.new(Color3.fromRGB(150, 190, 110), Color3.fromRGB(190, 200, 140))
+	emitter.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.45),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	emitter.Size = NumberSequence.new(1.2, 2.6)
+	emitter.Lifetime = NumberRange.new(0.7, 1.1)
+	emitter.Rate = 6
+	emitter.Speed = NumberRange.new(2, 4)
+	emitter.SpreadAngle = Vector2.new(25, 25)
+	emitter.Acceleration = Vector3.new(0, 3, 0)
+	emitter.EmissionDirection = Enum.NormalId.Back
+	emitter.Enabled = false
+	emitter.Parent = root
+
+	return emitter
+end
+
+local puff: ParticleEmitter? = nil
+
 -- Zwykly skok Humanoida wylaczony -- caly wznios idzie z pierdow.
-local function disableDefaultJump(character: Model)
+local function setupCharacter(character: Model)
 	local humanoid = character:WaitForChild("Humanoid") :: Humanoid
 	humanoid.UseJumpPower = true
 	humanoid.JumpPower = 0
+	puff = attachPuff(character)
 end
 
 if player.Character then
-	task.spawn(disableDefaultJump, player.Character)
+	task.spawn(setupCharacter, player.Character)
 end
-player.CharacterAdded:Connect(disableDefaultJump)
+player.CharacterAdded:Connect(setupCharacter)
+
+player:GetAttributeChangedSignal("Idling"):Connect(function()
+	if puff and puff.Parent then
+		puff.Enabled = player:GetAttribute("Idling") == true
+	end
+end)
 
 --------------------------------------------------------------------------------
 -- Znalezienie HUD-u
@@ -214,12 +252,12 @@ local function refresh()
 			else
 				zoneTitle.Text = zoneName
 				zoneTitle.TextColor3 = GREEN
-				zoneRate.Text = `wyrzutnia x{Format.short(zoneMultiplier)} XP`
+				zoneRate.Text = `baczki +{Format.short(number("IdleXp"))} XP/s`
 			end
 		else
 			zoneTitle.Text = "Plac"
 			zoneTitle.TextColor3 = Color3.fromRGB(180, 180, 190)
-			zoneRate.Text = "stan na strefie, zeby leciec za wiecej XP"
+			zoneRate.Text = "stan na strefie, zeby zbierac XP"
 		end
 
 		-- W locie liczy sie mnoznik z chwili startu, nie to co jest pod nogami.

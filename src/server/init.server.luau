@@ -388,6 +388,15 @@ RunService.Heartbeat:Connect(function(deltaTime)
 			session.launchMultiplier = zoneMultiplier
 		end
 
+		-- Baczki: samo stanie na odblokowanej strefie sypie XP.
+		local idleXp = 0
+		if grounded and zone and not locked then
+			idleXp = Config.Idle.xpPerSecond * zoneMultiplier * Config.rebirthMultiplier(profile.rebirths)
+			profile.xp += idleXp * step
+		end
+
+		player:SetAttribute("IdleXp", idleXp)
+		player:SetAttribute("Idling", idleXp > 0)
 		player:SetAttribute("LaunchMultiplier", session.launchMultiplier)
 		player:SetAttribute("ZoneName", zoneName)
 		player:SetAttribute("ZoneLocked", locked)
@@ -399,7 +408,14 @@ RunService.Heartbeat:Connect(function(deltaTime)
 
 		grantFameForHeight(player, session, height)
 		checkMarks(player, session, root.Position)
+
+		-- Poziom moze wskoczyc takze z samych baczkow, wiec sprawdzamy go tutaj,
+		-- nie tylko przy pierdnieciu.
+		local levelBefore = session.level
 		pushState(player, session)
+		if session.level > levelBefore then
+			notifyRemote:FireClient(player, "levelUp", session.level, Config.maxFarts(session.level))
+		end
 
 		topMarkNeeded = math.max(topMarkNeeded, Config.markAtHeight(height) + Config.Map.buildAheadMarks)
 

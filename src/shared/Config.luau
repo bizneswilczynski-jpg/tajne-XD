@@ -14,7 +14,7 @@
 export type Zone = {
 	id: string,
 	name: string,
-	multiplier: number, -- mnoznik XP dla lotu startujacego z tej strefy
+	multiplier: number, -- mnoznik XP: i tego z baczkow, i tego z lotu
 	unlockWins: number,
 	unlockFame: number,
 	color: Color3,
@@ -139,12 +139,17 @@ function Config.markAtHeight(height: number): number
 end
 
 --------------------------------------------------------------------------------
--- Strefy: mnoznik XP
+-- Strefy: pasywne baczki
 --------------------------------------------------------------------------------
--- Odkad zapas wraca w calosci po ladowaniu, nie ma juz czego przyspieszac --
--- wiec strefa mnozy XP. Mnoznik zapamietujemy w chwili startu z ziemi i trzyma
--- przez CALY lot: startujesz z lepszej wyrzutni, caly lot punktuje lepiej.
+-- Stanie na strefie samo daje XP -- postac puszcza baczki i kapie +1 XP na
+-- sekunde, bez naciskania czegokolwiek. To jest cale AFK gatunku "+1".
+-- Mnoznik strefy mnozy to tempo: lepsza strefa, wiecej XP na sekunde.
 -- Kazda strefa wymaga OBU walut naraz.
+
+Config.Idle = {
+	-- Ile XP na sekunde daje samo stanie na strefie, zanim wejdzie mnoznik.
+	xpPerSecond = 1,
+}
 
 Config.Zones = {
 	{ id = "beans", name = "Fasola", multiplier = 2, unlockWins = 0, unlockFame = 0, color = Color3.fromRGB(196, 132, 74) },
