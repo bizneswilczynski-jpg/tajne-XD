@@ -1,0 +1,41 @@
+{
+  "name": "plus-one-fart-and-fly",
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "Shared": {
+        "$path": "src/shared"
+      }
+    },
+
+    "ServerScriptService": {
+      "Server": {
+        "$path": "src/server"
+      }
+    },
+
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "Client": {
+          "$path": "src/client"
+        }
+      }
+    },
+
+    "Workspace": {
+      "$properties": {
+        "Gravity": 120,
+        "FilteringEnabled": true
+      }
+    },
+
+    "Lighting": {
+      "$properties": {
+        "ClockTime": 15,
+        "Brightness": 2,
+        "Ambient": [0.35, 0.35, 0.4]
+      }
+    }
+  }
+}
