@@ -89,8 +89,15 @@ local function buildZone(parent: Folder, zone: Config.Zone, index: number, total
 	pad:SetAttribute("ZoneId", zone.id)
 	CollectionService:AddTag(pad, World.ZONE_TAG)
 
-	local text = if zone.unlockAt > 0
-		then string.format("%s\nx%s tempa\nLOCK %s WIN", zone.name, Format.short(zone.multiplier), Format.short(zone.unlockAt))
+	local locked = zone.unlockWins > 0 or zone.unlockFame > 0
+	local text = if locked
+		then string.format(
+			"%s\nx%s tempa\nLOCK %s WIN + %s SLAWY",
+			zone.name,
+			Format.short(zone.multiplier),
+			Format.short(zone.unlockWins),
+			Format.short(zone.unlockFame)
+		)
 		else string.format("%s\nx%s tempa", zone.name, Format.short(zone.multiplier))
 
 	label(pad, text, 6).Name = "Info"

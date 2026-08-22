@@ -146,9 +146,6 @@ Config.Tube = {
 	buildAheadFloors = 6,
 	-- Ile pieter dokladamy za jednym razem.
 	buildBatch = 8,
-	-- Z ilu segmentow skladamy pierscien podlogi pietra. Srodek zostaje pusty,
-	-- zeby dalo sie przeleciec na wylot.
-	ringSegments = 10,
 	-- Szerokosc obwodki, na ktorej gracz laduje.
 	ledgeWidth = 9,
 	ledgeThickness = 2,
