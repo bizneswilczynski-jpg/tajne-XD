@@ -27,23 +27,37 @@ Mleko po terminie (+600/s) → Żurek z zeszłego roku (+3000/s)
 
 ## Uruchomienie
 
-Potrzebujesz [Rojo](https://rojo.space) i pluginu Rojo w Studio.
+Wersja CLI musi zgadzać się z wtyczką w Studio — projekt jest przypięty do **Rojo 7.6.1**
+(`rokit.toml`), tak jak Twój plugin.
+
+### Instalacja CLI (Windows)
+
+Najprościej — pobierz `rojo-7.6.1-win64.zip` z
+[releases](https://github.com/rojo-rbx/rojo/releases/tag/v7.6.1), rozpakuj `rojo.exe`
+i dodaj jego folder do `PATH`.
+
+Albo przez menedżer wersji (wtedy wersja pilnuje się sama z `rokit.toml`):
 
 ```bash
-# jednorazowo
-rokit install          # albo: cargo install rojo / pobierz binarkę z GitHuba
+rokit install
+```
 
-# za każdym razem
+### Codzienna praca
+
+```bash
 git pull
 rojo serve
 ```
 
-Potem w Studio: otwórz **pusty Baseplate** → zakładka **Dodatki plug-in** → **Rojo** →
-**Connect** (domyślnie `localhost:34872`). Kod wjeżdża do miejsca i od tej pory
+W Studio: otwórz **pusty Baseplate** → zakładka **Dodatki plug-in** → **Rojo** →
+adres `localhost`, port `34872` → **Connect**. Kod wjeżdża do miejsca i od tej pory
 synchronizuje się na żywo przy każdym zapisie pliku.
 
 Nie musisz nic stawiać ręcznie — mapa (spawn, stołówki, pierścienie, tabliczki
 wysokości) buduje się z kodu przy starcie serwera. Wciśnij **Play** i działa.
+
+> Jeśli po Connect drzewo jest puste, sprawdź czy `rojo serve` startuje w katalogu repo
+> (tam gdzie leży `default.project.json`).
 
 Alternatywnie, bez live-sync:
 
