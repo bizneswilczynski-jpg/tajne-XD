@@ -1,0 +1,13 @@
+name = "zastrzyki"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[vars]
+START_DATE = "2026-11-06"
+
+[triggers]
+crons = ["0 * * * *"]
+
+[[kv_namespaces]]
+binding = "STATE"
